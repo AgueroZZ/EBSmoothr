@@ -1,24 +1,37 @@
 Package: EBSmoothr
 Type: Package
-Title: What the Package Does (Title Case)
+Title: Empirical Bayes Smoothing with L-GP and Matern Priors
 Version: 0.1.0
 Authors@R: c(
     person(
-      "Jane", "Doe",
-      email = "jane@example.com",
+      "EBSmoothr", "Developers",
+      email = "devnull@example.com",
       role = c("aut", "cre")
     )
   )
-Description: More about what it does (maybe more than one line).
-    Continuation lines should be indented.
-License: What license is it under?
+Author: EBSmoothr Developers [aut, cre]
+Maintainer: EBSmoothr Developers <devnull@example.com>
+Description: Provides empirical Bayes smoothers for Gaussian means using
+    local Gaussian-process (L-GP) and Matern spatial priors. Includes a
+    TMB-based backend for L-GP and an exact Gaussian INLA/SPDE backend for
+    Matern models, returning `ebnm`-compatible posterior summaries.
+License: MIT + file LICENSE
 Encoding: UTF-8
-LazyData: true
+Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.3
+Additional_repositories: https://inla.r-inla-download.org/R/stable
 Imports:
     TMB,
-    Matrix
+    Matrix,
+    methods,
+    numDeriv,
+    LaplacesDemon,
+    ebnm,
+    INLA
+Suggests:
+    testthat (>= 3.0.0)
 LinkingTo:
     TMB,
     RcppEigen
+Config/testthat/edition: 3
 SystemRequirements: C++17

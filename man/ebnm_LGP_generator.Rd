@@ -22,7 +22,7 @@ A function that returns an object of class \code{"ebnm"} (and \code{"list"}).
 }
 \description{
 Returns a function with signature
-\code{function(x, s, g_init = NULL, fix_g = FALSE, output = NULL)}
+\code{function(x, s, g_init = NULL, fix_g = FALSE, beta_fixed = NULL, output = NULL)}
 that fits an L-GP smoother using a unified TMB objective.
 
 The fitted latent linear predictor is
@@ -58,6 +58,13 @@ The behavior is controlled by \code{LGP_setup$betaprec}:
       \item Step B: fix \code{theta} and infer \code{(U, beta)} jointly.
     }
 }
+
+\strong{Fixed-hyperparameter mode.}
+If \code{fix_g = TRUE}, the smoothing parameter \code{theta} is fixed at
+\code{g_init$scale} and the global coefficients \code{beta} are fixed at
+\code{beta_fixed}. If \code{beta_fixed} is \code{NULL}, the fitter uses a
+zero vector of length \code{ncol(LGP_setup$X)}. In this mode, Step B only
+infers the local coefficients \code{U}; it never re-estimates \code{beta}.
 
 \strong{Log-likelihood outputs.}
 The returned object includes multiple log-likelihood-style quantities:

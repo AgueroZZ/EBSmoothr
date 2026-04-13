@@ -14,7 +14,7 @@ plot(t, y, main = "Identity link", xlab = "t", ylab = "y")
 setup <- EBSmoothr::LGP_setup(
   t = t,
   p = 2,
-  beta_mode = "fixed"   # new syntax (equivalent to betaprec = 0)
+  betaprec = 0
 )
 
 fit_fun <- EBSmoothr::ebnm_LGP_generator(setup, link = "identity")
@@ -37,7 +37,7 @@ plot(t, y_log, main = "Log link", xlab = "t", ylab = "y")
 setup_log <- EBSmoothr::LGP_setup(
   t = t,
   p = 2,
-  beta_mode = "fixed"
+  betaprec = 0
 )
 
 fit_fun_log <- EBSmoothr::ebnm_LGP_generator(setup_log, link = "log")

@@ -1,2 +1,8 @@
 ^.*\.Rproj$
 ^\.Rproj\.user$
+^\.DS_Store$
+^\.Rhistory$
+^R/\.DS_Store$
+^src/\.DS_Store$
+^src/.*\.(o|so|dll|dylib)$
+^src/.*\.rds$

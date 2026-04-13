@@ -12,8 +12,13 @@
 .compute_logdet_spd <- function(Q) {
   if (!inherits(Q, "Matrix")) Q <- Matrix::Matrix(Q, sparse = TRUE)
   Q <- Matrix::forceSymmetric(Q)
-  F <- Matrix::Cholesky(Q, LDL = FALSE, perm = TRUE)  # perm=TRUE 通常更稳
-  as.numeric(Matrix::determinant(F, logarithm = TRUE)$modulus)
+  F <- Matrix::Cholesky(Q, LDL = FALSE, perm = TRUE)  # perm=TRUE is usually more stable
+  R <- if (inherits(F, "CHMfactor")) {
+    Matrix::expand(F)$L
+  } else {
+    as(F, "dtrMatrix")
+  }
+  2 * sum(log(abs(Matrix::diag(R))))
 }
 
 # internal function to compute the precision matrix for the L-GP, based on the differences between knots
@@ -153,9 +158,9 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
   B <- local_poly_helper(knots = knots, refined_x = t, p = p)
 
   tmbdat <- list(
-    X = as(as(as(X, "dMatrix"), "generalMatrix"), "TsparseMatrix"),
-    B = as(as(as(B, "dMatrix"), "generalMatrix"), "TsparseMatrix"),
-    P = as(as(as(P, "dMatrix"), "generalMatrix"), "TsparseMatrix"),
+    X = as(Matrix::Matrix(X, sparse = TRUE), "TsparseMatrix"),
+    B = as(Matrix::Matrix(B, sparse = TRUE), "TsparseMatrix"),
+    P = as(Matrix::Matrix(P, sparse = TRUE), "TsparseMatrix"),
     logPdet = sum(log(diff(knots))),  # OK for your diag(diff(knots)) P
     betaprec = as.numeric(betaprec),
     link_id = ifelse(link == "log", 1L, 0L)
@@ -171,7 +176,7 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
 #'
 #' @description
 #' Returns a function with signature
-#' \code{function(x, s, g_init = NULL, fix_g = FALSE, output = NULL)}
+#' \code{function(x, s, g_init = NULL, fix_g = FALSE, beta_fixed = NULL, output = NULL)}
 #' that fits an L-GP smoother using a unified TMB objective.
 #'
 #' The fitted latent linear predictor is
@@ -207,6 +212,13 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
 #'       \item Step B: fix \code{theta} and infer \code{(U, beta)} jointly.
 #'     }
 #' }
+#'
+#' \strong{Fixed-hyperparameter mode.}
+#' If \code{fix_g = TRUE}, the smoothing parameter \code{theta} is fixed at
+#' \code{g_init$scale} and the global coefficients \code{beta} are fixed at
+#' \code{beta_fixed}. If \code{beta_fixed} is \code{NULL}, the fitter uses a
+#' zero vector of length \code{ncol(LGP_setup$X)}. In this mode, Step B only
+#' infers the local coefficients \code{U}; it never re-estimates \code{beta}.
 #'
 #' \strong{Log-likelihood outputs.}
 #' The returned object includes multiple log-likelihood-style quantities:
@@ -286,7 +298,7 @@ ebnm_LGP_generator <- function(LGP_setup,
     do.call(cbind, cols)
   }
 
-  ebnm_gp <- function(x, s, g_init = NULL, fix_g = FALSE, output = NULL) {
+  ebnm_gp <- function(x, s, g_init = NULL, fix_g = FALSE, beta_fixed = NULL, output = NULL) {
 
     # ---- basic checks ----
     if (is.null(LGP_setup$X) || is.null(LGP_setup$B) || is.null(LGP_setup$P)) {
@@ -318,6 +330,22 @@ ebnm_LGP_generator <- function(LGP_setup,
 
     if (is.null(g_init)) g_init <- LGP(0)
     theta0 <- .check_numeric_scalar(g_init$scale, "g_init$scale")
+
+    if (!fix_g && !is.null(beta_fixed)) {
+      stop("`beta_fixed` can only be supplied when `fix_g = TRUE`.")
+    }
+    if (fix_g) {
+      if (is.null(beta_fixed)) {
+        beta_fixed_use <- rep(0, pX)
+      } else {
+        if (!is.numeric(beta_fixed) || length(beta_fixed) != pX || anyNA(beta_fixed)) {
+          stop("`beta_fixed` must be a numeric vector of length ncol(LGP_setup$X) with no NA.")
+        }
+        beta_fixed_use <- as.numeric(beta_fixed)
+      }
+    } else {
+      beta_fixed_use <- NULL
+    }
 
     # Parameter template required by the unified C++ objective
     par0 <- list(
@@ -383,7 +411,7 @@ ebnm_LGP_generator <- function(LGP_setup,
     } else {
       # If g is fixed, we do not optimize in Step A.
       fitted_theta <- theta0
-      fitted_beta  <- rep(0, pX)
+      fitted_beta  <- beta_fixed_use
     }
 
     fitted_g <- LGP(fitted_theta)
@@ -395,7 +423,7 @@ ebnm_LGP_generator <- function(LGP_setup,
     # We compute Step B joint and Laplace-corrected values for diagnostics.
     # IMPORTANT: StepB_laplace uses OLD-style logdet to match EBMFSmooth.
     # ============================================================
-    if (betaprec < 0) {
+    if (fix_g || betaprec < 0) {
       # Fix theta AND beta, infer U only
       mapB <- list(
         theta = factor(NA),
@@ -521,7 +549,7 @@ ebnm_LGP_generator <- function(LGP_setup,
 
     posterior_sampler <- function(nsamp) {
       samps <- LaplacesDemon::rmvnp(n = nsamp, mu = as.numeric(optB$par), Omega = as.matrix(prec))
-      if (betaprec < 0) {
+      if (fix_g || betaprec < 0) {
         # sample U only
         U_s <- samps
         eta_s <- as.matrix(tmbdat$B) %*% t(U_s) + as.matrix(tmbdat$X) %*% beta_hat
@@ -552,4 +580,3 @@ ebnm_LGP_generator <- function(LGP_setup,
 
   ebnm_gp
 }
-
