@@ -12,9 +12,14 @@ Authors@R: c(
 Author: EBSmoothr Developers [aut, cre]
 Maintainer: EBSmoothr Developers <devnull@example.com>
 Description: Provides empirical Bayes smoothers for Gaussian means using
-    local Gaussian-process (L-GP) and Matern spatial priors. Includes a
-    TMB-based backend for L-GP and an exact Gaussian INLA/SPDE backend for
-    Matern models, returning `ebnm`-compatible posterior summaries.
+    local Gaussian-process (L-GP) and Matern spatial priors. Supports
+    known-noise `ebnm` workflows through `ebnm_LGP_generator()` and
+    `ebnm_Matern_generator()`, and a higher-level `eb_smoother()`
+    interface that can also learn one common observation noise SD when
+    standard errors are unknown. Includes a constant Gaussian baseline,
+    point-mass reference families, spatial scoring wrappers, TMB backends
+    for L-GP and Matern Laplace models, and exact Gaussian / INLA-SPDE
+    backends for Matern models.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
@@ -29,7 +34,8 @@ Imports:
     ebnm,
     INLA
 Suggests:
-    testthat (>= 3.0.0)
+    testthat (>= 3.0.0),
+    flashier
 LinkingTo:
     TMB,
     RcppEigen

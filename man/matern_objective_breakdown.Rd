@@ -6,7 +6,7 @@
 \usage{
 matern_objective_breakdown(
   fit,
-  beta_mode = c("auto", "fixed", "profile", "integrated_flat")
+  beta_mode = c("auto", "fixed", "empirical_bayes", "prior_flat", "prior_proper")
 )
 }
 \arguments{
@@ -14,15 +14,15 @@ matern_objective_breakdown(
 
 \item{beta_mode}{Character string indicating which exact beta-handling
 convention should be treated as the comparator. Supported values are
-\code{"auto"}, \code{"fixed"}, \code{"profile"}, and
-\code{"integrated_flat"}.}
+\code{"auto"}, \code{"fixed"}, \code{"empirical_bayes"},
+\code{"prior_flat"}, and \code{"prior_proper"}.}
 }
 \value{
 A named list containing the fitted hyperparameters, exact
-  log-likelihood values under fixed/profile/integrated-flat beta handling,
-  the PC-prior term when relevant, the corresponding exact penalized
-  objectives, and the gap between the recorded \code{fit$log_likelihood} and
-  the selected exact comparator.
+log-likelihood values under fixed / empirical-Bayes / flat-prior /
+proper-prior beta handling, the PC-prior term when relevant, the
+corresponding exact penalized objectives, and the gap between the recorded
+\code{fit$log_likelihood} and the selected exact comparator.
 }
 \description{
 Re-evaluates the fitted Matern model under the package's manual Gaussian

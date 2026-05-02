@@ -1,391 +1,695 @@
-test_that("Matern generator only supports the identity link", {
-  loc <- seq(0, 1, length.out = 10)
-  expect_error(
-    ebnm_Matern_generator(locations = loc, link = "log"),
-    "identity"
-  )
+test_that("Matern generator supports log-link positive smoothing", {
+  set.seed(11)
+
+  loc <- seq(0, 1, length.out = 8)
+  s <- rep(0.08, length(loc))
+  x <- exp(0.2 + 0.25 * sin(2 * pi * loc)) + rnorm(length(loc), sd = s)
+
+  fit <- ebnm_Matern_generator(locations = loc, link = "log")(x, s)
+
+  expect_equal(fit$backend, "laplace_fisher")
+  expect_equal(fit$laplace_implementation, "tmb")
+  expect_equal(fit$laplace_curvature, "fisher")
+  expect_equal(fit$log_likelihood_semantics, "laplace_fisher_empirical_bayes")
+  expect_equal(fit$link, "log")
+  expect_true(all(fit$posterior$mean > 0))
+  expect_true(is.finite(as.numeric(fit$log_likelihood)))
 })
 
-test_that("Exact Matern fit returns finite 1D posterior summaries", {
-  set.seed(3)
+test_that("Matern auto backend uses Fisher Laplace for log-link fits", {
+  set.seed(111)
 
-  loc <- seq(0, 1, length.out = 30)
-  s <- rep(0.12, length(loc))
-  x <- 0.25 + sin(2 * pi * loc) + rnorm(length(loc), sd = s)
+  loc <- as.matrix(expand.grid(
+    x = seq(0, 1, length.out = 4),
+    y = seq(0, 1, length.out = 4)
+  ))
+  s <- rep(0.1, nrow(loc))
+  eta <- 0.1 + 0.2 * sin(2 * pi * loc[, 1]) + 0.1 * cos(2 * pi * loc[, 2])
+  x <- exp(eta) + rnorm(nrow(loc), sd = s)
+  setup <- Matern_setup(locations = loc, max.edge = 0.6)
 
-  fit_fun <- ebnm_Matern_generator(locations = loc)
-  fit <- fit_fun(x, s)
+  fit_auto_fixed <- ebnm_Matern_generator(setup = setup, link = "log")(x, s, beta_fixed = 0)
+  fit_laplace_fixed <- ebnm_Matern_generator(
+    setup = setup,
+    link = "log",
+    backend = "laplace_tmb"
+  )(x, s, beta_fixed = 0)
+  fit_auto_eb <- ebnm_Matern_generator(setup = setup, link = "log")(x, s)
+  fit_auto_fixed_g <- ebnm_Matern_generator(setup = setup, link = "log")(
+    x,
+    s,
+    g_init = Matern(theta = log(0.4), sigma = 0.25),
+    fix_g = TRUE,
+    beta_fixed = 0
+  )
 
-  expect_equal(nrow(fit$posterior), length(loc))
+  expect_equal(fit_auto_fixed$backend, "laplace_fisher")
+  expect_equal(fit_auto_fixed$laplace_implementation, "tmb")
+  expect_equal(fit_auto_fixed$laplace_curvature, "fisher")
+  expect_equal(fit_auto_fixed$log_likelihood_semantics, "laplace_fisher_fixed")
+  expect_equal(fit_laplace_fixed$backend, "laplace")
+  expect_equal(fit_laplace_fixed$laplace_implementation, "tmb")
+  expect_equal(fit_laplace_fixed$laplace_curvature, "observed")
+  expect_true(is.finite(as.numeric(fit_auto_fixed$log_likelihood)))
+  expect_true(is.finite(as.numeric(fit_laplace_fixed$log_likelihood)))
+  expect_lt(max(abs(fit_auto_fixed$posterior$mean - fit_laplace_fixed$posterior$mean)), 0.05)
+
+  expect_equal(fit_auto_eb$backend, "laplace_fisher")
+  expect_equal(fit_auto_eb$laplace_implementation, "tmb")
+  expect_equal(fit_auto_eb$laplace_curvature, "fisher")
+  expect_equal(fit_auto_fixed_g$backend, "laplace_fisher")
+  expect_equal(fit_auto_fixed_g$laplace_implementation, "tmb")
+  expect_equal(fit_auto_fixed_g$laplace_curvature, "fisher")
+})
+
+test_that("Matern log-link manual and INLA backends agree", {
+  set.seed(12)
+
+  loc <- seq(0, 1, length.out = 8)
+  s <- rep(0.1, length(loc))
+  x <- exp(0.15 + 0.2 * sin(2 * pi * loc)) + rnorm(length(loc), sd = s)
+
+  fit_laplace_eb <- ebnm_Matern_generator(
+    locations = loc,
+    link = "log",
+    backend = "laplace"
+  )(x, s)
+  fit_inla_eb <- ebnm_Matern_generator(
+    locations = loc,
+    link = "log",
+    backend = "inla"
+  )(x, s)
+
+  expect_equal(fit_inla_eb$beta_mode, "empirical_bayes")
+  expect_false(is.null(fit_inla_eb$beta_profile_optimization))
+  expect_equal(fit_laplace_eb$laplace_implementation, "tmb")
+  expect_equal(as.numeric(fit_laplace_eb$log_likelihood), as.numeric(fit_inla_eb$log_likelihood), tolerance = 2e-3)
+  expect_equal(fit_laplace_eb$fitted_g$theta, fit_inla_eb$fitted_g$theta, tolerance = 3e-2)
+  expect_equal(fit_laplace_eb$fitted_g$sigma, fit_inla_eb$fitted_g$sigma, tolerance = 3e-2)
+  expect_lt(max(abs(fit_laplace_eb$posterior$mean - fit_inla_eb$posterior$mean)), 0.04)
+
+  fit_laplace <- ebnm_Matern_generator(
+    locations = loc,
+    link = "log",
+    backend = "laplace"
+  )(x, s, beta_fixed = 0.15)
+  fit_inla <- ebnm_Matern_generator(
+    locations = loc,
+    link = "log",
+    backend = "inla"
+  )(x, s, beta_fixed = 0.15)
+
+  expect_equal(fit_laplace$laplace_implementation, "tmb")
+  expect_equal(as.numeric(fit_laplace$log_likelihood), as.numeric(fit_inla$log_likelihood), tolerance = 1e-3)
+  expect_equal(fit_laplace$fitted_g$theta, fit_inla$fitted_g$theta, tolerance = 1e-2)
+  expect_equal(fit_laplace$fitted_g$sigma, fit_inla$fitted_g$sigma, tolerance = 1e-2)
+  expect_lt(max(abs(fit_laplace$posterior$mean - fit_inla$posterior$mean)), 0.03)
+
+  fit_laplace_flat <- ebnm_Matern_generator(
+    locations = loc,
+    link = "log",
+    backend = "laplace"
+  )(x, s, beta_prec = 0)
+  fit_inla_flat <- ebnm_Matern_generator(
+    locations = loc,
+    link = "log",
+    backend = "inla"
+  )(x, s, beta_prec = 0)
+
+  expect_equal(fit_laplace_flat$laplace_implementation, "tmb")
+  expect_equal(as.numeric(fit_laplace_flat$log_likelihood), as.numeric(fit_inla_flat$log_likelihood), tolerance = 1e-3)
+  expect_equal(fit_laplace_flat$fitted_g$theta, fit_inla_flat$fitted_g$theta, tolerance = 1e-2)
+  expect_equal(fit_laplace_flat$fitted_g$sigma, fit_inla_flat$fitted_g$sigma, tolerance = 1e-2)
+  expect_lt(max(abs(fit_laplace_flat$posterior$mean - fit_inla_flat$posterior$mean)), 0.04)
+
+  pc <- list(range = c(0.25, 0.5), sigma = c(0.25, 0.5))
+  fit_laplace_pc <- ebnm_Matern_generator(
+    locations = loc,
+    link = "log",
+    backend = "laplace",
+    pc.penalty = pc
+  )(x, s, beta_fixed = 0.15)
+  fit_inla_pc <- ebnm_Matern_generator(
+    locations = loc,
+    link = "log",
+    backend = "inla",
+    pc.penalty = pc
+  )(x, s, beta_fixed = 0.15)
+
+  expect_equal(fit_laplace_pc$laplace_implementation, "tmb")
+  expect_equal(as.numeric(fit_laplace_pc$log_likelihood), as.numeric(fit_inla_pc$log_likelihood), tolerance = 1e-3)
+  expect_lt(max(abs(fit_laplace_pc$posterior$mean - fit_inla_pc$posterior$mean)), 0.04)
+})
+
+test_that("Matern log-link Laplace backend supports beta modes", {
+  set.seed(13)
+
+  loc <- seq(0, 1, length.out = 7)
+  s <- rep(0.1, length(loc))
+  x <- exp(0.1 + 0.2 * sin(2 * pi * loc)) + rnorm(length(loc), sd = s)
+  fit_fun <- ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace")
+
+  fit_eb <- fit_fun(x, s)
+  fit_fixed <- fit_fun(x, s, beta_fixed = 0.1)
+  fit_flat <- fit_fun(x, s, beta_prec = 0)
+  fit_proper <- fit_fun(x, s, beta_prec = 2)
+  fit_tmb <- ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace_tmb")(x, s)
+  fit_r <- ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace_r")(x, s)
+  fit_tmb_flat <- ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace_tmb")(x, s, beta_prec = 0)
+  fit_r_flat <- ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace_r")(x, s, beta_prec = 0)
+
+  expect_equal(fit_eb$beta_mode, "empirical_bayes")
+  expect_equal(fit_fixed$beta_mode, "fixed")
+  expect_equal(fit_flat$beta_mode, "prior_flat")
+  expect_equal(fit_proper$beta_mode, "prior_proper")
+  expect_equal(fit_eb$laplace_implementation, "tmb")
+  expect_equal(fit_fixed$laplace_implementation, "tmb")
+  expect_equal(fit_flat$laplace_implementation, "tmb")
+  expect_equal(fit_proper$laplace_implementation, "tmb")
+  expect_equal(fit_fixed$laplace_diagnostics$tmb_mode_source, "last.par.best")
+  expect_equal(as.numeric(fit_tmb$log_likelihood), as.numeric(fit_r$log_likelihood), tolerance = 1e-5)
+  expect_equal(as.numeric(fit_tmb_flat$log_likelihood), as.numeric(fit_r_flat$log_likelihood), tolerance = 1e-5)
+  expect_true(all(fit_eb$posterior$mean > 0))
+  expect_true(all(fit_fixed$posterior$mean > 0))
+  expect_true(all(fit_flat$posterior$mean > 0))
+  expect_true(all(fit_proper$posterior$mean > 0))
+})
+
+test_that("Matern log-link Fisher backend supports beta modes and learned noise", {
+  set.seed(131)
+
+  loc <- seq(0, 1, length.out = 7)
+  s <- rep(0.1, length(loc))
+  x <- exp(0.1 + 0.2 * sin(2 * pi * loc)) + rnorm(length(loc), sd = s)
+  fit_fun <- ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace_fisher")
+
+  fit_eb <- fit_fun(x, s)
+  fit_fixed <- fit_fun(x, s, beta_fixed = 0.1)
+  fit_flat <- fit_fun(x, s, beta_prec = 0)
+  fit_proper <- fit_fun(x, s, beta_prec = 2)
+  learned_eb <- eb_smoother(x, s = NULL, family = "matern", locations = loc, link = "log")
+  learned_fixed <- eb_smoother(x, s = NULL, family = "matern", locations = loc, link = "log", beta_fixed = 0.1)
+  learned_flat <- eb_smoother(x, s = NULL, family = "matern", locations = loc, link = "log", beta_prec = 0)
+  learned_proper <- eb_smoother(x, s = NULL, family = "matern", locations = loc, link = "log", beta_prec = 2)
+
+  for (fit in list(fit_eb, fit_fixed, fit_flat, fit_proper, learned_eb, learned_fixed, learned_flat, learned_proper)) {
+    expect_equal(fit$backend, "laplace_fisher")
+    expect_equal(fit$laplace_curvature, "fisher")
+    expect_match(fit$log_likelihood_semantics, "^laplace_fisher_")
+    expect_true(all(is.finite(fit$posterior$mean)))
+    expect_true(all(is.finite(fit$posterior$var)))
+  }
+
+  expect_equal(fit_eb$beta_mode, "empirical_bayes")
+  expect_equal(fit_fixed$beta_mode, "fixed")
+  expect_equal(fit_flat$beta_mode, "prior_flat")
+  expect_equal(fit_proper$beta_mode, "prior_proper")
+  expect_equal(learned_eb$beta_mode, "empirical_bayes")
+  expect_equal(learned_fixed$beta_mode, "fixed")
+  expect_equal(learned_flat$beta_mode, "prior_flat")
+  expect_equal(learned_proper$beta_mode, "prior_proper")
+  expect_true(is.finite(learned_eb$fitted_noise_sd))
+  expect_gt(learned_eb$fitted_noise_sd, 0)
+})
+
+test_that("Matern observed and Fisher Laplace are close but distinct on ordinary log-link data", {
+  set.seed(132)
+
+  loc <- seq(0, 1, length.out = 7)
+  s <- rep(0.1, length(loc))
+  x <- exp(0.1 + 0.2 * sin(2 * pi * loc)) + rnorm(length(loc), sd = s)
+
+  fit_fisher <- ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace_fisher")(x, s)
+  fit_observed <- ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace_r")(x, s)
+
+  expect_equal(fit_fisher$backend, "laplace_fisher")
+  expect_equal(fit_fisher$laplace_curvature, "fisher")
+  expect_equal(fit_observed$backend, "laplace")
+  expect_equal(fit_observed$laplace_curvature, "observed")
+  expect_lt(max(abs(fit_fisher$posterior$mean - fit_observed$posterior$mean)), 0.01)
+  expect_gt(abs(as.numeric(fit_fisher$log_likelihood) - as.numeric(fit_observed$log_likelihood)), 1e-5)
+})
+
+test_that("Matern Fisher curvature stays positive on deterministic pseudo-pathology", {
+  eta <- rep(log(1), 4)
+  x <- c(0.9, 1.1, 3.5, 4.0)
+  s <- rep(0.1, length(x))
+
+  observed <- EBSmoothr:::.matern_observation_terms(
+    eta = eta,
+    x = x,
+    s = s,
+    link = "log",
+    laplace_curvature = "observed"
+  )
+  fisher <- EBSmoothr:::.matern_observation_terms(
+    eta = eta,
+    x = x,
+    s = s,
+    link = "log",
+    laplace_curvature = "fisher"
+  )
+
+  expect_true(any(observed$hess_diag < 0))
+  expect_true(all(fisher$hess_diag > 0))
+
+  loc <- seq(0, 1, length.out = 9)
+  x_fit <- c(1, 1.05, 8, 1.1, 0.95, 7, 1, 1.05, 0.9)
+  fit <- ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace_fisher")(x_fit, rep(0.08, length(loc)))
+  expect_equal(fit$backend, "laplace_fisher")
+  expect_equal(fit$laplace_curvature, "fisher")
   expect_true(all(is.finite(fit$posterior$mean)))
   expect_true(all(is.finite(fit$posterior$var)))
-  expect_true(is.finite(as.numeric(fit$log_likelihood)))
-  expect_s3_class(fit$fitted_g, "Matern")
-  expect_length(fit$fitted_beta, 1)
-  expect_equal(fit$beta_mode, "profile")
-  expect_null(fit$inla_result)
-  expect_true(nrow(fit$posterior_spatial_field) > 0)
 })
 
-test_that("Matern PC penalty parsing supports defaults and validates inputs", {
-  set.seed(21)
+test_that("Matern TMB Laplace validation catches unusable fits", {
+  valid_fit <- list(
+    posterior = data.frame(
+      mean = c(1, 2),
+      var = c(0.1, 0.2),
+      second_moment = c(1.1, 4.2)
+    ),
+    log_likelihood = structure(1, class = "logLik"),
+    laplace_diagnostics = list(stepB_joint_nll = 2)
+  )
+  expect_null(EBSmoothr:::.matern_laplace_tmb_invalid_reason(valid_fit))
+
+  invalid_posterior <- valid_fit
+  invalid_posterior$posterior$mean[1] <- Inf
+  expect_match(
+    EBSmoothr:::.matern_laplace_tmb_invalid_reason(invalid_posterior),
+    "non-finite posterior"
+  )
+
+  invalid_stepB <- valid_fit
+  invalid_stepB$laplace_diagnostics$stepB_joint_nll <- Inf
+  expect_match(
+    EBSmoothr:::.matern_laplace_tmb_invalid_reason(invalid_stepB),
+    "Step B"
+  )
+
+  skipped_stepB <- valid_fit
+  skipped_stepB$laplace_diagnostics$stepB_joint_nll <- NA_real_
+  expect_null(EBSmoothr:::.matern_laplace_tmb_invalid_reason(skipped_stepB))
+})
+
+test_that("Matern wrapper supports known and learned-noise log links", {
+  set.seed(14)
+
+  loc <- seq(0, 1, length.out = 7)
+  s <- rep(0.1, length(loc))
+  x <- exp(0.1 + 0.2 * sin(2 * pi * loc)) + rnorm(length(loc), sd = s)
+
+  fit <- eb_smoother(
+    x,
+    s = s,
+    family = "matern",
+    locations = loc,
+    link = "log"
+  )
+
+  expect_equal(fit$backend, "laplace_fisher")
+  expect_equal(fit$raw_fit$laplace_implementation, "tmb")
+  expect_equal(fit$raw_fit$laplace_curvature, "fisher")
+  expect_equal(fit$log_likelihood_semantics, "laplace_fisher_empirical_bayes")
+  expect_equal(fit$link, "log")
+  expect_true(all(fit$posterior$mean > 0))
+
+  fit_learned <- eb_smoother(
+    x,
+    s = NULL,
+    family = "matern",
+    locations = loc,
+    link = "log"
+  )
+  expect_equal(fit_learned$backend, "laplace_fisher")
+  expect_equal(fit_learned$raw_fit$laplace_implementation, "tmb")
+  expect_equal(fit_learned$raw_fit$laplace_curvature, "fisher")
+  expect_equal(fit_learned$log_likelihood_semantics, "laplace_fisher_empirical_bayes")
+  expect_equal(fit_learned$noise_mode, "estimated")
+  expect_gt(fit_learned$fitted_noise_sd, 0)
+  expect_true(all(fit_learned$posterior$mean > 0))
+})
+
+test_that("Matern log-link learned-noise Laplace implementations agree across beta modes", {
+  set.seed(142)
+
+  loc <- seq(0, 1, length.out = 8)
+  x <- exp(0.1 + 0.18 * sin(2 * pi * loc)) + rnorm(length(loc), sd = 0.08)
+  base_args <- list(x = x, s = NULL, family = "matern", locations = loc, link = "log")
+  beta_cases <- list(
+    list(beta_mode = "empirical_bayes"),
+    list(beta_mode = "fixed", beta_fixed = 0.1),
+    list(beta_mode = "prior_flat", beta_prec = 0),
+    list(beta_mode = "prior_proper", beta_prec = 2)
+  )
+
+  for (case in beta_cases) {
+    fit_tmb <- do.call(eb_smoother, c(base_args, list(backend = "laplace_tmb"), case[setdiff(names(case), "beta_mode")]))
+    fit_r <- do.call(eb_smoother, c(base_args, list(backend = "laplace_r"), case[setdiff(names(case), "beta_mode")]))
+
+    expect_equal(fit_tmb$beta_mode, case$beta_mode)
+    expect_equal(fit_tmb$raw_fit$laplace_implementation, "tmb")
+    expect_equal(as.numeric(fit_tmb$log_likelihood), as.numeric(fit_r$log_likelihood), tolerance = 2e-3)
+    expect_equal(unname(fit_tmb$fitted_beta), unname(fit_r$fitted_beta), tolerance = 2e-3)
+    expect_lt(max(abs(fit_tmb$posterior$mean - fit_r$posterior$mean)), 3e-3)
+  }
+
+  pc <- list(range = c(0.3, 0.5), sigma = c(0.2, 0.5), noise = c(0.08, 0.5))
+  fit_pc_auto <- do.call(eb_smoother, c(base_args, list(pc.penalty = pc, beta_fixed = 0.1)))
+  expect_equal(fit_pc_auto$backend, "laplace_fisher")
+  expect_equal(fit_pc_auto$raw_fit$laplace_curvature, "fisher")
+  expect_true(is.finite(as.numeric(fit_pc_auto$log_likelihood)))
+
+  fit_pc_tmb <- do.call(eb_smoother, c(base_args, list(backend = "laplace_tmb", pc.penalty = pc, beta_fixed = 0.1)))
+  fit_pc_r <- do.call(eb_smoother, c(base_args, list(backend = "laplace_r", pc.penalty = pc, beta_fixed = 0.1)))
+  expect_equal(fit_pc_tmb$backend, "laplace")
+  expect_equal(fit_pc_tmb$raw_fit$laplace_implementation, "tmb")
+  expect_equal(as.numeric(fit_pc_tmb$log_likelihood), as.numeric(fit_pc_r$log_likelihood), tolerance = 2e-3)
+})
+
+test_that("Matern log-link learned-noise INLA validates against package Laplace", {
+  set.seed(143)
+
+  loc <- seq(0, 1, length.out = 10)
+  x <- exp(0.1 + 0.15 * sin(2 * pi * loc)) + rnorm(length(loc), sd = 0.08)
+
+  fit_or_error <- tryCatch(
+    eb_smoother(
+      x,
+      s = NULL,
+      family = "matern",
+      locations = loc,
+      link = "log",
+      backend = "inla"
+    ),
+    error = function(e) e
+  )
+  if (inherits(fit_or_error, "error")) {
+    expect_match(conditionMessage(fit_or_error), "INLA Matern validation failed|INLA learned-noise Matern noise profiling failed")
+    expect_false(grepl("not currently supported", conditionMessage(fit_or_error), fixed = TRUE))
+  } else {
+    expect_equal(fit_or_error$backend, "inla")
+    expect_equal(fit_or_error$raw_fit$inla_validation$status, "passed")
+  }
+})
+
+test_that("Matern INLA log-link likelihood uses spatial-mode warm starts", {
+  set.seed(141)
+
+  loc <- seq(0, 1, length.out = 120)
+  s <- rep(0.1, length(loc))
+  x <- exp(0.15 + 0.25 * sin(2 * pi * loc) + 0.08 * cos(6 * pi * loc)) +
+    rnorm(length(loc), sd = s)
+  setup <- Matern_setup(loc)
+
+  fit_tmb <- ebnm_Matern_generator(setup = setup, link = "log", backend = "laplace_tmb")(x, s, beta_fixed = 0)
+  fit_inla <- ebnm_Matern_generator(setup = setup, link = "log", backend = "inla")(x, s, beta_fixed = 0)
+
+  expect_equal(as.numeric(fit_inla$log_likelihood), fit_inla$log_likelihood_laplace_at_inla_mode, tolerance = 1e-10)
+  expect_equal(as.numeric(fit_tmb$log_likelihood), as.numeric(fit_inla$log_likelihood), tolerance = 1e-2)
+  expect_lt(max(abs(fit_tmb$posterior$mean - fit_inla$posterior$mean)), 0.01)
+})
+
+test_that("Identity-link Laplace backend matches exact Matern backend", {
+  set.seed(15)
+
+  loc <- seq(0, 1, length.out = 8)
+  s <- rep(0.1, length(loc))
+  x <- 0.2 + sin(2 * pi * loc) + rnorm(length(loc), sd = s)
+
+  fit_exact <- ebnm_Matern_generator(locations = loc, backend = "exact")(x, s)
+  fit_laplace <- ebnm_Matern_generator(locations = loc, backend = "laplace")(x, s)
+
+  expect_equal(as.numeric(fit_exact$log_likelihood), as.numeric(fit_laplace$log_likelihood), tolerance = 1e-5)
+  expect_equal(fit_exact$posterior$mean, fit_laplace$posterior$mean, tolerance = 1e-4)
+  expect_equal(fit_laplace$laplace_implementation, "tmb")
+})
+
+test_that("Quiet INLA defaults provide an explicit thread specification", {
+  opts <- EBSmoothr:::.with_quiet_inla_defaults(INLA:::inla.getOption.default())
+
+  expect_match(opts$num.threads, "^[0-9]+:1$")
+  expect_false(grepl("^NA", opts$num.threads))
+})
+
+test_that("Exact known-noise Matern fit uses empirical-Bayes beta by default", {
+  set.seed(1)
+
+  loc <- seq(0, 1, length.out = 25)
+  s <- rep(0.1, length(loc))
+  x <- 0.2 + sin(2 * pi * loc) + rnorm(length(loc), sd = s)
+
+  fit <- ebnm_Matern_generator(locations = loc)(x, s)
+
+  expect_equal(fit$backend, "exact")
+  expect_equal(fit$beta_mode, "empirical_bayes")
+  expect_s3_class(fit$fitted_g, "Matern")
+  expect_equal(unname(fit$fitted_g$beta), unname(fit$fitted_beta), tolerance = 1e-8)
+  expect_null(fit$fitted_g$beta_prec)
+  expect_true(is.finite(as.numeric(fit$log_likelihood)))
+  expect_equal(nrow(fit$posterior), length(loc))
+})
+
+test_that("Identity-link INLA backends report the package exact objective", {
+  set.seed(1011)
+
+  loc <- seq(0, 1, length.out = 18)
+  s <- rep(0.1, length(loc))
+  x <- 0.2 + 0.4 * sin(2 * pi * loc) + rnorm(length(loc), sd = s)
+
+  fit_exact <- ebnm_Matern_generator(locations = loc, backend = "exact")(x, s)
+  fit_inla <- ebnm_Matern_generator(locations = loc, backend = "inla")(x, s)
+  expect_equal(fit_inla$log_likelihood_semantics, "exact_at_inla_mode_empirical_bayes")
+  expect_equal(as.numeric(fit_inla$log_likelihood), fit_inla$log_likelihood_exact_at_stepA_mode, tolerance = 1e-10)
+  expect_equal(as.numeric(fit_exact$log_likelihood), as.numeric(fit_inla$log_likelihood), tolerance = 1e-3)
+  expect_lt(max(abs(fit_exact$posterior$mean - fit_inla$posterior$mean)), 1e-3)
+
+  fit_wrap <- eb_smoother(
+    x,
+    s = s,
+    family = "matern",
+    locations = loc,
+    backend = "inla"
+  )
+  expect_equal(fit_wrap$log_likelihood_semantics, "exact_at_inla_mode_empirical_bayes")
+  expect_equal(as.numeric(fit_wrap$log_likelihood), fit_wrap$log_likelihood_exact_at_stepA_mode, tolerance = 1e-10)
+})
+
+test_that("Matern generator with PC prior stays exact under empirical-Bayes beta", {
+  set.seed(2)
 
   loc <- seq(0, 1, length.out = 20)
   s <- rep(0.12, length(loc))
   x <- sin(2 * pi * loc) + rnorm(length(loc), sd = s)
 
-  fit_fun_partial <- ebnm_Matern_generator(
+  fit <- ebnm_Matern_generator(
     locations = loc,
-    pc.penalty = list(range = 0.2)
-  )
-  fit_partial <- fit_fun_partial(x, s)
+    pc.penalty = list(range = 0.2, sigma = 0.3)
+  )(x, s)
 
-  expect_equal(fit_partial$backend, "inla_pc")
-  expect_equal(unname(fit_partial$pc_penalty$range["anchor"]), 0.2, tolerance = 1e-10)
-  expect_equal(unname(fit_partial$pc_penalty$range["alpha"]), 0.5, tolerance = 1e-10)
-  expect_equal(unname(fit_partial$pc_penalty$sigma["alpha"]), 0.5, tolerance = 1e-10)
-  expect_true(unname(fit_partial$pc_penalty$sigma["anchor"]) > 0)
-
-  fit_fun_bad_alpha <- ebnm_Matern_generator(
-    locations = loc,
-    pc.penalty = list(range = c(0.2, 1))
-  )
-  expect_error(
-    fit_fun_bad_alpha(x, s),
-    "alpha must satisfy 0 < alpha < 1"
-  )
-
-  fit_fun_bad_names <- ebnm_Matern_generator(
-    locations = loc,
-    pc.penalty = list(foo = c(0.2, 0.5))
-  )
-  expect_error(
-    fit_fun_bad_names(x, s),
-    "only supports `range` and `sigma`"
-  )
+  expect_equal(fit$backend, "exact")
+  expect_equal(fit$beta_mode, "empirical_bayes")
+  expect_equal(fit$prior_family, "identity_Matern_pc_exact")
+  expect_true(is.finite(as.numeric(fit$log_likelihood)))
+  expect_true(is.finite(fit$log_likelihood_pc_prior_theta))
 })
 
-test_that("Exact Matern marginal likelihood matches dense Gaussian evaluation", {
-  build_mesh_A <- getFromNamespace(".build_mesh_A", "EBSmoothr")
-  exact_matern_state <- getFromNamespace(".exact_matern_state", "EBSmoothr")
+test_that("Matern wrapper dispatches PC-prior fits by beta mode", {
+  set.seed(3)
 
-  set.seed(11)
+  loc <- seq(0, 1, length.out = 20)
+  x <- sin(2 * pi * loc) + rnorm(length(loc), sd = 0.1)
+  pc <- list(range = c(0.2, 0.5), sigma = c(0.3, 0.5))
 
-  loc <- seq(0, 1, length.out = 12)
-  meshA <- build_mesh_A(matrix(loc, ncol = 1), max.edge = 0.1)
-  A <- meshA$A
-  spde <- INLA::inla.spde2.matern(meshA$mesh, alpha = 2)
-
-  x <- rnorm(length(loc))
-  s <- rep(0.15, length(loc))
-  par_grid <- rbind(
-    c(log(0.2), log(0.4), 0.0),
-    c(log(0.3), log(0.7), 0.5),
-    c(log(0.12), log(0.25), -0.2)
+  fit_eb <- eb_smoother(
+    x,
+    s = 0.1,
+    family = "matern",
+    locations = loc,
+    pc.penalty = pc
   )
+  expect_equal(fit_eb$backend, "exact")
+  expect_equal(fit_eb$beta_mode, "empirical_bayes")
 
-  for (k in seq_len(nrow(par_grid))) {
-    st <- exact_matern_state(
-      x = x,
-      s = s,
-      A = A,
-      spde_template = spde,
-      alpha = 2,
-      d = 1,
-      log_range = par_grid[k, 1],
-      log_sigma = par_grid[k, 2],
-      beta0 = par_grid[k, 3]
-    )
+  fit_flat <- eb_smoother(
+    x,
+    s = 0.1,
+    family = "matern",
+    locations = loc,
+    pc.penalty = pc,
+    beta_prec = 0
+  )
+  expect_equal(fit_flat$backend, "exact")
+  expect_equal(fit_flat$beta_mode, "prior_flat")
+  expect_equal(unname(fit_flat$fitted_g$beta_prec), 0, tolerance = 1e-10)
 
-    Sigma <- as.matrix(A) %*% solve(as.matrix(st$Q)) %*% t(as.matrix(A)) + diag(s^2)
-    r <- x - par_grid[k, 3]
-    dense_ll <- -0.5 * (
-      length(x) * log(2 * pi) +
-        as.numeric(determinant(Sigma, logarithm = TRUE)$modulus) +
-        drop(t(r) %*% solve(Sigma, r))
-    )
-
-    expect_equal(st$log_marginal, dense_ll, tolerance = 1e-8)
-  }
+  fit_fixed <- eb_smoother(
+    x,
+    s = 0.1,
+    family = "matern",
+    locations = loc,
+    pc.penalty = pc,
+    beta_fixed = 0
+  )
+  expect_equal(fit_fixed$backend, "exact")
+  expect_equal(fit_fixed$beta_mode, "fixed")
+  expect_equal(unname(fit_fixed$fitted_beta), 0, tolerance = 1e-10)
 })
 
-test_that("Exact Matern fixed-parameter mode uses beta_fixed and fixed g_init", {
+test_that("Matern exact backend supports fixed and prior beta modes with PC prior", {
   set.seed(4)
 
-  loc <- seq(0, 1, length.out = 30)
-  s <- rep(0.15, length(loc))
-  x <- 1 + sin(2 * pi * loc) + rnorm(length(loc), sd = s)
-
-  fit_fun <- ebnm_Matern_generator(locations = loc)
-  g_fix <- Matern(theta = log(0.2), sigma = 0.05)
-
-  fit_default_beta <- fit_fun(x, s, g_init = g_fix, fix_g = TRUE)
-  fit_custom_beta <- fit_fun(x, s, g_init = g_fix, fix_g = TRUE, beta_fixed = 1)
-
-  expect_equal(unname(fit_default_beta$fitted_beta), 0, tolerance = 1e-10)
-  expect_equal(unname(fit_custom_beta$fitted_beta), 1, tolerance = 1e-10)
-  expect_equal(fit_default_beta$fitted_g$theta, log(0.2), tolerance = 1e-10)
-  expect_equal(fit_default_beta$fitted_g$sigma, 0.05, tolerance = 1e-10)
-  expect_gt(
-    mean(fit_custom_beta$posterior$mean - fit_default_beta$posterior$mean),
-    0.2
-  )
-  expect_gt(
-    abs(as.numeric(fit_custom_beta$log_likelihood) - as.numeric(fit_default_beta$log_likelihood)),
-    1
-  )
-
-  expect_error(
-    fit_fun(x, s, beta_fixed = 1),
-    "`beta_fixed` can only be supplied"
-  )
-})
-
-test_that("INLA PC-prior Matern mode returns Step A diagnostics and backend metadata", {
-  set.seed(22)
-
-  loc <- seq(0, 1, length.out = 25)
-  s <- rep(0.15, length(loc))
-  x <- 0.3 + sin(2 * pi * loc) + rnorm(length(loc), sd = s)
-
-  fit_fun_pc <- ebnm_Matern_generator(
-    locations = loc,
-    pc.penalty = list(range = c(0.2, 0.5), sigma = c(0.3, 0.5))
-  )
-  fit_pc <- fit_fun_pc(x, s)
-
-  expect_equal(fit_pc$backend, "inla_pc")
-  expect_equal(fit_pc$prior_family, "identity_Matern_pc")
-  expect_equal(fit_pc$beta_mode, "integrated_flat")
-  expect_false(is.null(fit_pc$inla_result))
-  expect_equal(
-    as.numeric(fit_pc$log_likelihood),
-    fit_pc$log_likelihood_stepA_penalized,
-    tolerance = 1e-8
-  )
-  expect_true(is.finite(fit_pc$log_likelihood_stepA_mlik_integration))
-  expect_true(is.finite(fit_pc$log_likelihood_stepA_mlik_gaussian))
-  expect_true(is.finite(fit_pc$log_likelihood_stepA_joint_log_posterior))
-  expect_null(fit_pc$log_likelihood_exact_at_stepA_mode)
-  expect_true(all(is.finite(fit_pc$posterior$mean)))
-  expect_true(all(is.finite(fit_pc$posterior$var)))
-  expect_warning(
-    draws <- fit_pc$posterior_sampler(2),
-    "not implemented"
-  )
-  expect_equal(dim(draws), c(2, length(loc)))
-  expect_true(all(is.na(draws)))
-})
-
-test_that("INLA PC-prior Matern can optionally compute the exact Step A diagnostic", {
-  set.seed(2201)
-
   loc <- seq(0, 1, length.out = 20)
-  s <- rep(0.15, length(loc))
-  x <- 0.3 + sin(2 * pi * loc) + rnorm(length(loc), sd = s)
+  x <- 0.3 + sin(2 * pi * loc) + rnorm(length(loc), sd = 0.1)
+  pc <- list(range = c(0.2, 0.5), sigma = c(0.3, 0.5))
 
-  fit_fun_pc <- ebnm_Matern_generator(
-    locations = loc,
-    pc.penalty = list(range = c(0.2, 0.5), sigma = c(0.3, 0.5)),
-    compute_exact_diagnostic = TRUE
-  )
-  fit_pc <- fit_fun_pc(x, s)
-
-  expect_true(is.finite(fit_pc$log_likelihood_exact_at_stepA_mode))
-})
-
-test_that("INLA PC-prior fixed mode uses penalized pseudo-objective", {
-  set.seed(23)
-
-  loc <- seq(0, 1, length.out = 25)
-  s <- rep(0.14, length(loc))
-  x <- 1 + sin(2 * pi * loc) + rnorm(length(loc), sd = s)
-
-  fit_fun_pc <- ebnm_Matern_generator(
-    locations = loc,
-    pc.penalty = list(range = c(0.2, 0.5), sigma = c(0.3, 0.5))
-  )
-
-  fit_pc_fixed <- fit_fun_pc(
+  fit_fixed <- eb_smoother(
     x,
-    s,
-    g_init = Matern(theta = log(0.2), sigma = 0.3),
-    fix_g = TRUE,
-    beta_fixed = 1
-  )
-
-  expect_equal(fit_pc_fixed$backend, "inla_pc")
-  expect_equal(unname(fit_pc_fixed$fitted_beta), 1, tolerance = 1e-10)
-  expect_equal(fit_pc_fixed$beta_mode, "fixed")
-  expect_equal(
-    as.numeric(fit_pc_fixed$log_likelihood),
-    fit_pc_fixed$log_likelihood_stepB + fit_pc_fixed$log_likelihood_pc_prior_theta,
-    tolerance = 1e-8
-  )
-  expect_null(fit_pc_fixed$log_likelihood_stepA_penalized)
-  expect_true(is.finite(fit_pc_fixed$log_likelihood_stepB))
-  expect_true(is.finite(fit_pc_fixed$log_likelihood_pc_prior_theta))
-  expect_warning(
-    draws <- fit_pc_fixed$posterior_sampler(3),
-    "not implemented"
-  )
-  expect_equal(dim(draws), c(3, length(loc)))
-  expect_true(all(is.na(draws)))
-})
-
-test_that("INLA Step B conditional marginal likelihood is prior-invariant when theta is fixed", {
-  set.seed(24)
-
-  loc <- seq(0, 1, length.out = 20)
-  s <- rep(0.15, length(loc))
-  x <- 0.2 + sin(2 * pi * loc) + rnorm(length(loc), sd = s)
-  g_fix <- Matern(theta = log(0.2), sigma = 0.3)
-
-  fit_fun_balanced <- ebnm_Matern_generator(
+    s = 0.1,
+    family = "matern",
     locations = loc,
-    pc.penalty = list(range = c(0.2, 0.5), sigma = c(0.3, 0.5))
+    backend = "exact",
+    pc.penalty = pc,
+    beta_fixed = 0.3
   )
-  fit_fun_smooth <- ebnm_Matern_generator(
-    locations = loc,
-    pc.penalty = list(range = c(0.2, 0.1), sigma = c(0.3, 0.1))
-  )
+  expect_equal(fit_fixed$backend, "exact")
+  expect_equal(fit_fixed$beta_mode, "fixed")
+  expect_equal(unname(fit_fixed$fitted_beta), 0.3, tolerance = 1e-10)
 
-  fit_balanced <- fit_fun_balanced(x, s, g_init = g_fix, fix_g = TRUE, beta_fixed = 0.2)
-  fit_smooth <- fit_fun_smooth(x, s, g_init = g_fix, fix_g = TRUE, beta_fixed = 0.2)
-
-  expect_equal(
-    fit_balanced$log_likelihood_stepB,
-    fit_smooth$log_likelihood_stepB,
-    tolerance = 1e-8
-  )
-  expect_gt(
-    abs(as.numeric(fit_balanced$log_likelihood) - as.numeric(fit_smooth$log_likelihood)),
-    1e-4
-  )
-})
-
-test_that("Exact and weak-PC Matern fits remain close on a small two-dimensional example", {
-  set.seed(25)
-
-  grid <- expand.grid(
-    x = seq(0, 1, length.out = 5),
-    y = seq(0, 1, length.out = 4)
-  )
-  loc <- as.matrix(grid)
-  s <- rep(0.18, nrow(loc))
-  x <- with(grid, sin(2 * pi * x) * cos(2 * pi * y)) + rnorm(nrow(loc), sd = s)
-
-  fit_exact <- ebnm_Matern_generator(locations = loc, max.edge = c(0.3, 0.45))(x, s)
-  fit_pc <- ebnm_Matern_generator(
-    locations = loc,
-    max.edge = c(0.3, 0.45),
-    pc.penalty = list(range = c(0.2, 0.5), sigma = c(0.3, 0.5))
-  )(x, s)
-
-  expect_gt(stats::cor(fit_exact$posterior$mean, fit_pc$posterior$mean), 0.99)
-  expect_lt(sqrt(mean((fit_exact$posterior$mean - fit_pc$posterior$mean)^2)), 0.05)
-})
-
-test_that("matern_objective_breakdown matches recorded exact and fixed-PC objectives", {
-  set.seed(2501)
-
-  loc <- seq(0, 1, length.out = 25)
-  s <- rep(0.15, length(loc))
-  x <- 0.2 + sin(2 * pi * loc) + rnorm(length(loc), sd = s)
-
-  fit_exact <- ebnm_Matern_generator(locations = loc)(x, s)
-  bd_exact <- matern_objective_breakdown(fit_exact)
-
-  expect_equal(bd_exact$matched_beta_mode, "profile")
-  expect_equal(
-    bd_exact$recorded_log_likelihood,
-    bd_exact$matched_exact_objective,
-    tolerance = 1e-8
-  )
-  expect_true(is.null(bd_exact$log_pc_prior_theta))
-
-  fit_pc_fixed <- ebnm_Matern_generator(
-    locations = loc,
-    pc.penalty = list(range = c(0.2, 0.5), sigma = c(0.3, 0.5))
-  )(
+  fit_flat <- eb_smoother(
     x,
-    s,
-    g_init = Matern(theta = log(0.2), sigma = 0.3),
-    fix_g = TRUE,
-    beta_fixed = 0.2
-  )
-  bd_pc_fixed <- matern_objective_breakdown(fit_pc_fixed)
-
-  expect_equal(bd_pc_fixed$matched_beta_mode, "fixed")
-  expect_equal(
-    bd_pc_fixed$objective_fixed_plus_prior,
-    bd_pc_fixed$matched_exact_objective,
-    tolerance = 1e-8
-  )
-  expect_true(is.finite(bd_pc_fixed$log_pc_prior_theta))
-})
-
-test_that("matern_objective_breakdown exposes exact integrated-flat comparator for Step A PC fits", {
-  set.seed(2502)
-
-  loc <- seq(0, 1, length.out = 25)
-  s <- rep(0.15, length(loc))
-  x <- 0.2 + sin(2 * pi * loc) + rnorm(length(loc), sd = s)
-
-  fit_pc <- ebnm_Matern_generator(
+    s = 0.1,
+    family = "matern",
     locations = loc,
-    pc.penalty = list(range = c(0.2, 0.5), sigma = c(0.3, 0.5))
-  )(x, s)
+    backend = "exact",
+    pc.penalty = pc,
+    beta_prec = 0
+  )
+  expect_equal(fit_flat$backend, "exact")
+  expect_equal(fit_flat$beta_mode, "prior_flat")
+  expect_equal(unname(fit_flat$fitted_g$beta_prec), 0, tolerance = 1e-10)
 
-  bd_pc <- matern_objective_breakdown(fit_pc)
-
-  expect_equal(bd_pc$matched_beta_mode, "integrated_flat")
-  expect_true(is.finite(bd_pc$objective_integrated_flat_plus_prior))
-  expect_true(is.finite(bd_pc$recorded_minus_matched_exact))
+  fit_proper <- eb_smoother(
+    x,
+    s = 0.1,
+    family = "matern",
+    locations = loc,
+    backend = "exact",
+    pc.penalty = pc,
+    beta_prec = 2
+  )
+  expect_equal(fit_proper$backend, "exact")
+  expect_equal(fit_proper$beta_mode, "prior_proper")
+  expect_equal(unname(fit_proper$fitted_g$beta_prec), 2, tolerance = 1e-10)
 })
 
-test_that("Exact Matern optimization improves over the supplied initialization", {
+test_that("Matern INLA backends support empirical-Bayes beta", {
+  loc <- seq(0, 1, length.out = 8)
+  x <- sin(2 * pi * loc)
+
+  fit_gen <- ebnm_Matern_generator(
+    locations = loc,
+    link = "log",
+    backend = "inla"
+  )(exp(0.1 + x), 0.1)
+  expect_equal(fit_gen$backend, "inla")
+  expect_equal(fit_gen$beta_mode, "empirical_bayes")
+  expect_true(is.finite(fit_gen$fitted_beta))
+  expect_false(is.null(fit_gen$beta_profile_optimization))
+
+  fit_wrap <- eb_smoother(
+    x,
+    s = 0.1,
+    family = "matern",
+    locations = loc,
+    backend = "inla",
+    pc.penalty = list(range = 0.2, sigma = 0.3)
+  )
+  expect_equal(fit_wrap$backend, "inla")
+  expect_equal(fit_wrap$beta_mode, "empirical_bayes")
+  expect_true(is.finite(fit_wrap$fitted_beta))
+  expect_false(is.null(fit_wrap$beta_profile_optimization))
+})
+
+test_that("Learned-noise Matern supports exact empirical-Bayes beta with PC prior", {
   set.seed(5)
 
-  loc <- seq(0, 1, length.out = 35)
-  s <- rep(0.12, length(loc))
-  x <- 0.5 + sin(2 * pi * loc) + rnorm(length(loc), sd = s)
+  loc <- seq(0, 1, length.out = 20)
+  x <- 0.2 + sin(2 * pi * loc) + rnorm(length(loc), sd = 0.08)
 
-  fit_fun <- ebnm_Matern_generator(locations = loc)
-  g_init <- Matern(theta = log(0.05), sigma = 0.2)
-  beta0_init <- stats::weighted.mean(x, 1 / (s^2))
-
-  fit_init <- fit_fun(
+  fit <- eb_smoother(
     x,
-    s,
-    g_init = g_init,
-    fix_g = TRUE,
-    beta_fixed = beta0_init
+    s = NULL,
+    family = "matern",
+    locations = loc,
+    pc.penalty = list(range = 0.2, sigma = 0.3, noise = 0.1)
   )
-  fit_opt <- fit_fun(x, s, g_init = g_init)
 
-  expect_gte(
-    as.numeric(fit_opt$log_likelihood),
-    as.numeric(fit_init$log_likelihood) - 1e-6
-  )
+  expect_equal(fit$backend, "exact")
+  expect_equal(fit$beta_mode, "empirical_bayes")
+  expect_true(is.finite(fit$fitted_noise_sd))
+  expect_gt(fit$fitted_noise_sd, 0)
 })
 
-test_that("Exact Matern supports two-dimensional locations", {
+test_that("Learned-noise Matern INLA path supports flat and proper beta priors", {
   set.seed(6)
 
-  grid <- expand.grid(
-    x = seq(0, 1, length.out = 6),
-    y = seq(0, 1, length.out = 5)
+  loc <- seq(0, 1, length.out = 20)
+  x <- 0.2 + sin(2 * pi * loc) + rnorm(length(loc), sd = 0.08)
+  pc <- list(range = 0.2, sigma = 0.3, noise = 0.1)
+
+  fit_flat <- eb_smoother(
+    x,
+    s = NULL,
+    family = "matern",
+    locations = loc,
+    backend = "inla",
+    pc.penalty = pc,
+    beta_prec = 0,
+    compute_exact_diagnostic = TRUE
   )
-  loc <- as.matrix(grid)
-  s <- rep(0.15, nrow(loc))
-  x <- with(grid, sin(2 * pi * x) * cos(2 * pi * y)) + rnorm(nrow(loc), sd = s)
+  expect_equal(fit_flat$backend, "inla")
+  expect_equal(fit_flat$beta_mode, "prior_flat")
+  expect_true(is.finite(fit_flat$log_likelihood_stepA_penalized))
+  expect_true(is.finite(fit_flat$log_likelihood_exact_at_stepA_mode))
 
-  fit_fun <- ebnm_Matern_generator(locations = loc, max.edge = c(0.25, 0.4))
-  fit <- fit_fun(x, s)
+  fit_proper <- eb_smoother(
+    x,
+    s = NULL,
+    family = "matern",
+    locations = loc,
+    backend = "inla",
+    pc.penalty = pc,
+    beta_prec = 2
+  )
+  expect_equal(fit_proper$backend, "inla")
+  expect_equal(fit_proper$beta_mode, "prior_proper")
+  expect_equal(unname(fit_proper$fitted_g$beta_prec), 2, tolerance = 1e-10)
+})
 
-  expect_equal(nrow(fit$posterior), nrow(loc))
-  expect_true(all(is.finite(fit$posterior$mean)))
-  expect_true(all(is.finite(fit$posterior$var)))
-  expect_true(nrow(fit$posterior_spatial_field) > 0)
+test_that("matern_objective_breakdown follows the new beta mode semantics", {
+  set.seed(7)
+
+  loc <- seq(0, 1, length.out = 18)
+  x <- 0.3 + sin(2 * pi * loc) + rnorm(length(loc), sd = 0.1)
+
+  fit_exact <- ebnm_Matern_generator(locations = loc)(x, 0.1)
+  br_exact <- matern_objective_breakdown(fit_exact)
+  expect_equal(br_exact$matched_beta_mode, "empirical_bayes")
+  expect_true(is.finite(br_exact$matched_exact_objective))
+
+  fit_pc_exact <- eb_smoother(
+    x,
+    s = 0.1,
+    family = "matern",
+    locations = loc,
+    backend = "exact",
+    pc.penalty = list(range = 0.2, sigma = 0.3),
+    beta_prec = 0
+  )$raw_fit
+  class(fit_pc_exact) <- c("ebnm", "list")
+  br_flat <- matern_objective_breakdown(fit_pc_exact)
+  expect_equal(br_flat$matched_beta_mode, "prior_flat")
+  expect_true(is.finite(br_flat$matched_exact_objective))
 })

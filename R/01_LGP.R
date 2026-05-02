@@ -1,24 +1,43 @@
-# ---- internal: diag(A Q^{-1} A^T) for SPD precision Q ----
-.compute_diag_A_Qinv_At <- function(A, Q) {
-  Q <- Matrix::forceSymmetric(Matrix::Matrix(Q, sparse = TRUE))
-  A <- Matrix::Matrix(A, sparse = TRUE)
+# ---- internal: sparse SPD factorization and derived helpers ----
+.factorize_spd <- function(Q, perm = TRUE) {
+  if (inherits(Q, "ebsmooth_spd_factor")) {
+    return(Q)
+  }
 
-  cholQ <- Matrix::Cholesky(Q, LDL = FALSE, perm = FALSE)
-  V <- Matrix::solve(cholQ, Matrix::t(A), system = "A")
+  if (!inherits(Q, "Matrix")) Q <- Matrix::Matrix(Q, sparse = TRUE)
+  Q <- Matrix::forceSymmetric(Q)
+  cholQ <- Matrix::Cholesky(Q, LDL = FALSE, perm = perm)
+  R <- if (inherits(cholQ, "CHMfactor")) {
+    Matrix::expand(cholQ)$L
+  } else {
+    as(cholQ, "dtrMatrix")
+  }
+
+  structure(
+    list(
+      matrix = Q,
+      chol = cholQ,
+      logdet = as.numeric(2 * sum(log(abs(Matrix::diag(R))))),
+      perm = perm
+    ),
+    class = "ebsmooth_spd_factor"
+  )
+}
+
+.solve_spd_factor <- function(factor, rhs) {
+  factor <- .factorize_spd(factor)
+  Matrix::solve(factor$chol, rhs, system = "A")
+}
+
+.compute_diag_A_Qinv_At <- function(A, Q) {
+  factor <- .factorize_spd(Q)
+  A <- Matrix::Matrix(A, sparse = TRUE)
+  V <- .solve_spd_factor(factor, Matrix::t(A))
   as.numeric(Matrix::rowSums(A * Matrix::t(V)))
 }
 
-# # Old-package-compatible logdet: determinant(as.matrix(H))$modulus
 .compute_logdet_spd <- function(Q) {
-  if (!inherits(Q, "Matrix")) Q <- Matrix::Matrix(Q, sparse = TRUE)
-  Q <- Matrix::forceSymmetric(Q)
-  F <- Matrix::Cholesky(Q, LDL = FALSE, perm = TRUE)  # perm=TRUE is usually more stable
-  R <- if (inherits(F, "CHMfactor")) {
-    Matrix::expand(F)$L
-  } else {
-    as(F, "dtrMatrix")
-  }
-  2 * sum(log(abs(Matrix::diag(R))))
+  .factorize_spd(Q)$logdet
 }
 
 # internal function to compute the precision matrix for the L-GP, based on the differences between knots
@@ -94,6 +113,9 @@ get_local_poly <- function (knots, refined_x, p) {
 #' @description Creates an object from the one-parameter L-GP family.
 #'
 #' @param scale A numeric value representing the scale parameter of the L-GP.
+#' @param beta Optional intercept state stored with the L-GP object.
+#' @param beta_prec Optional non-negative prior precision stored with the L-GP
+#'   object.
 #'
 #' @return An object of class `"LGP"`, a data frame containing the scale parameter.
 #'
@@ -102,8 +124,19 @@ get_local_poly <- function (knots, refined_x, p) {
 #' print(gp)
 #'
 #' @export
-LGP <- function (scale) {
-  structure(data.frame(scale), class = "LGP")
+LGP <- function(scale = 0, beta = NULL, beta_prec = NULL) {
+  scale <- .check_single_numeric(scale, "scale")
+  beta <- .check_optional_beta_vector(beta, "beta")
+  beta_prec <- .check_optional_beta_prec(beta_prec, "beta_prec")
+
+  structure(
+    list(
+      scale = scale,
+      beta = beta,
+      beta_prec = beta_prec
+    ),
+    class = "LGP"
+  )
 }
 
 
@@ -112,8 +145,10 @@ LGP <- function (scale) {
 #'
 #' @description
 #' Precomputes the design matrices and penalty components used by the
-#' L-GP smoother. The returned list is intended to be passed to
-#' \code{\link{ebnm_LGP_generator}}.
+#' L-GP smoother. The returned list can be passed directly to
+#' \code{\link{ebnm_LGP_generator}} for known-standard-error workflows, or
+#' reused through \code{\link{eb_smoother}} with
+#' \code{family = "lgp"}.
 #'
 #' The model uses a global polynomial basis \code{X} (degree \code{p-1})
 #' and a local spline-like basis \code{B}. The local coefficients are
@@ -125,7 +160,7 @@ LGP <- function (scale) {
 #'   (default \code{2}, corresponding to an intercept + linear term).
 #' @param num_knots Integer number of knots used to build the local basis
 #'   (default \code{30}).
-#' @param betaprec Numeric scalar controlling the prior precision on the
+#' @param betaprec Numeric scalar controlling the legacy fallback precision on the
 #'   global coefficients \code{beta}:
 #'   \itemize{
 #'     \item \code{betaprec > 0}: proper Gaussian prior with precision \code{betaprec}.
@@ -134,6 +169,9 @@ LGP <- function (scale) {
 #'       (optimized rather than treated as random in Step A; see
 #'       \code{\link{ebnm_LGP_generator}}).
 #'   }
+#'   This value is retained for backward compatibility. New code should prefer
+#'   the public \code{beta_prec} argument on \code{\link{ebnm_LGP_generator}}
+#'   and \code{\link{eb_smoother}}.
 #' @param link Either \code{"identity"} or \code{"log"}. This value is stored
 #'   as \code{link_id} in the returned object for convenience; the final
 #'   link used by the fitter is determined by the \code{link} argument in
@@ -145,6 +183,7 @@ LGP <- function (scale) {
 #'     \item \code{logPdet}: \eqn{\log|P|} for the penalty/precision component.
 #'     \item \code{betaprec}: the value supplied via \code{betaprec}.
 #'     \item \code{link_id}: integer encoding of the requested link (\code{0} identity, \code{1} log).
+#'     \item \code{model_id}: internal TMB objective selector; \code{0} for L-GP.
 #'   }
 #'
 #' @export
@@ -163,21 +202,410 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
     P = as(Matrix::Matrix(P, sparse = TRUE), "TsparseMatrix"),
     logPdet = sum(log(diff(knots))),  # OK for your diag(diff(knots)) P
     betaprec = as.numeric(betaprec),
-    link_id = ifelse(link == "log", 1L, 0L)
+    link_id = ifelse(link == "log", 1L, 0L),
+    model_id = 0L
   )
   tmbdat
+}
+
+.lgp_observation_terms <- function(eta,
+                                   x,
+                                   s,
+                                   link = c("identity", "log"),
+                                   laplace_curvature = c("observed", "fisher")) {
+  link <- match.arg(link)
+  laplace_curvature <- match.arg(laplace_curvature)
+  eta <- as.numeric(eta)
+  x <- as.numeric(x)
+  s <- as.numeric(s)
+  if (identical(link, "identity")) {
+    mu <- eta
+    grad <- (mu - x) / (s^2)
+    hess_diag <- 1 / (s^2)
+  } else {
+    if (any(eta > 40)) {
+      stop("The log-link linear predictor overflowed during L-GP optimization.")
+    }
+    mu <- exp(eta)
+    grad <- mu * (mu - x) / (s^2)
+    hess_diag <- if (identical(laplace_curvature, "fisher")) {
+      mu^2 / (s^2)
+    } else {
+      mu * (2 * mu - x) / (s^2)
+    }
+  }
+  resid <- x - mu
+  nll <- 0.5 * sum((resid / s)^2 + log(2 * pi * s^2))
+  if (!is.finite(nll) || any(!is.finite(grad)) || any(!is.finite(hess_diag))) {
+    stop("Non-finite observation terms in L-GP Laplace objective.")
+  }
+  list(nll = as.numeric(nll), grad = as.numeric(grad), hess_diag = as.numeric(hess_diag), mu = mu)
+}
+
+.lgp_response_moments_from_eta <- function(eta_mean, eta_var, link = c("identity", "log")) {
+  link <- match.arg(link)
+  eta_mean <- as.numeric(eta_mean)
+  eta_var <- pmax(as.numeric(eta_var), 0)
+  if (identical(link, "identity")) {
+    return(list(mean = eta_mean, var = eta_var))
+  }
+  mean <- exp(eta_mean + 0.5 * eta_var)
+  var <- exp(2 * eta_mean + eta_var) * (exp(eta_var) - 1)
+  list(mean = as.numeric(mean), var = as.numeric(var))
+}
+
+.lgp_prior_precision <- function(theta, P, pX, beta_mode, beta_prec = NULL) {
+  P <- Matrix::Matrix(P, sparse = TRUE)
+  Q_u <- Matrix::forceSymmetric(Matrix::Matrix(exp(theta) * P, sparse = TRUE))
+  if (!(beta_mode %in% c("prior_flat", "prior_proper"))) {
+    return(Q_u)
+  }
+  beta_prec0 <- if (identical(beta_mode, "prior_proper")) {
+    beta_prec <- .check_optional_beta_prec(beta_prec, "beta_prec")
+    if (is.null(beta_prec) || beta_prec <= 0) {
+      stop("`beta_prec` must be positive for proper-prior beta.")
+    }
+    beta_prec
+  } else {
+    0
+  }
+  Matrix::forceSymmetric(Matrix::bdiag(
+    Q_u,
+    Matrix::Diagonal(n = pX, x = beta_prec0)
+  ))
+}
+
+.lgp_laplace_inner_objective <- function(x,
+                                         s,
+                                         B,
+                                         X,
+                                         P,
+                                         logPdet,
+                                         theta,
+                                         beta_mode,
+                                         beta_value = NULL,
+                                         beta_prec = NULL,
+                                         beta_init = NULL,
+                                         initial_mode = NULL,
+                                         link = c("identity", "log"),
+                                         laplace_curvature = c("observed", "fisher")) {
+  link <- match.arg(link)
+  laplace_curvature <- match.arg(laplace_curvature)
+  x <- as.numeric(x)
+  s <- as.numeric(s)
+  B <- Matrix::Matrix(B, sparse = TRUE)
+  X <- Matrix::Matrix(X, sparse = TRUE)
+  P <- Matrix::Matrix(P, sparse = TRUE)
+  pB <- ncol(B)
+  pX <- ncol(X)
+  integrate_beta <- beta_mode %in% c("prior_flat", "prior_proper")
+  prior_precision <- .lgp_prior_precision(theta, P, pX, beta_mode, beta_prec)
+  if (integrate_beta) {
+    A_eta <- cbind(B, X)
+    default_z0 <- c(rep(0, pB), as.numeric(beta_init))
+  } else {
+    beta_value <- .check_optional_beta_vector(beta_value, "beta_value", expected_length = pX, allow_null = FALSE)
+    A_eta <- B
+    default_z0 <- rep(0, pB)
+  }
+  z0 <- if (!is.null(initial_mode) &&
+            length(initial_mode) == length(default_z0) &&
+            all(is.finite(initial_mode))) {
+    as.numeric(initial_mode)
+  } else {
+    default_z0
+  }
+
+  objective <- function(z) {
+    z <- as.numeric(z)
+    eta <- as.numeric(A_eta %*% z)
+    if (!integrate_beta) eta <- eta + as.numeric(X %*% beta_value)
+    obs <- .lgp_observation_terms(eta = eta, x = x, s = s, link = link, laplace_curvature = laplace_curvature)
+    prior_quad <- as.numeric(0.5 * sum(z * as.numeric(prior_precision %*% z)))
+    obs$nll + prior_quad
+  }
+  gradient <- function(z) {
+    z <- as.numeric(z)
+    eta <- as.numeric(A_eta %*% z)
+    if (!integrate_beta) eta <- eta + as.numeric(X %*% beta_value)
+    obs <- .lgp_observation_terms(eta = eta, x = x, s = s, link = link, laplace_curvature = laplace_curvature)
+    as.numeric(Matrix::t(A_eta) %*% obs$grad + prior_precision %*% z)
+  }
+  opt <- stats::nlminb(
+    start = z0,
+    objective = objective,
+    gradient = gradient,
+    control = list(eval.max = 1000, iter.max = 1000)
+  )
+  if (!is.finite(opt$objective)) {
+    stop("L-GP Laplace inner optimization failed.")
+  }
+
+  z_mode <- as.numeric(opt$par)
+  eta_mode <- as.numeric(A_eta %*% z_mode)
+  if (!integrate_beta) eta_mode <- eta_mode + as.numeric(X %*% beta_value)
+  obs <- .lgp_observation_terms(eta = eta_mode, x = x, s = s, link = link, laplace_curvature = laplace_curvature)
+  W_eta <- Matrix::Diagonal(x = obs$hess_diag)
+  H <- prior_precision + Matrix::t(A_eta) %*% W_eta %*% A_eta
+  H <- Matrix::forceSymmetric(Matrix::Matrix(H, sparse = TRUE))
+  H_factor <- .factorize_spd(H)
+
+  U_mode <- z_mode[seq_len(pB)]
+  log_prior <- 0.5 * (pB * theta + logPdet) - 0.5 * pB * log(2 * pi) -
+    0.5 * exp(theta) * sum(U_mode * as.numeric(P %*% U_mode))
+  if (integrate_beta) {
+    beta_hat <- z_mode[pB + seq_len(pX)]
+    if (identical(beta_mode, "prior_proper")) {
+      beta_prec0 <- .check_optional_beta_prec(beta_prec, "beta_prec")
+      log_prior <- log_prior + 0.5 * pX * log(beta_prec0) -
+        0.5 * pX * log(2 * pi) -
+        0.5 * beta_prec0 * sum(beta_hat^2)
+    }
+    eta_design <- A_eta
+  } else {
+    beta_hat <- as.numeric(beta_value)
+    eta_design <- B
+  }
+  log_joint <- -obs$nll + log_prior
+  log_marginal <- log_joint + 0.5 * length(z_mode) * log(2 * pi) - 0.5 * H_factor$logdet
+  eta_var <- .compute_diag_A_Qinv_At(eta_design, H_factor)
+  response <- .lgp_response_moments_from_eta(eta_mode, eta_var, link = link)
+
+  list(
+    log_marginal = as.numeric(log_marginal),
+    log_joint = as.numeric(log_joint),
+    mode = z_mode,
+    precision = H,
+    precision_factor = H_factor,
+    fitted_beta = as.numeric(beta_hat),
+    U_hat = as.numeric(U_mode),
+    eta_mean = eta_mode,
+    eta_var = eta_var,
+    posterior = data.frame(
+      mean = response$mean,
+      var = response$var,
+      second_moment = response$mean^2 + response$var
+    ),
+    integrated_beta = integrate_beta,
+    eta_design = eta_design,
+    inner_convergence = opt$convergence,
+    inner_message = opt$message
+  )
+}
+
+.optimize_lgp_objective <- function(par0, fixed_names, safe_objective, eval_objective, failure_label) {
+  fixed_names <- intersect(unique(fixed_names), names(par0))
+  free_names <- setdiff(names(par0), fixed_names)
+  expand_par <- function(par_free) {
+    out <- par0
+    out[free_names] <- as.numeric(par_free)
+    out
+  }
+  if (!length(free_names)) {
+    return(list(objective = eval_objective(par0), opt = NULL, method = "fixed"))
+  }
+  methods <- c("BFGS", "Nelder-Mead")
+  last_message <- NULL
+  for (method in methods) {
+    opt <- tryCatch(
+      stats::optim(par = par0[free_names], fn = function(z) safe_objective(expand_par(z)), method = method),
+      error = function(e) e
+    )
+    if (inherits(opt, "error")) {
+      last_message <- conditionMessage(opt)
+      next
+    }
+    if (!is.finite(opt$value) || opt$value >= 1e99) {
+      last_message <- sprintf("%s optimization reached the finite penalty under method %s.", failure_label, method)
+      next
+    }
+    objective <- tryCatch(eval_objective(expand_par(opt$par)), error = function(e) e)
+    if (inherits(objective, "error")) {
+      last_message <- conditionMessage(objective)
+      next
+    }
+    return(list(objective = objective, opt = opt, method = method, free_names = free_names, fixed_names = fixed_names))
+  }
+  stop(failure_label, ": ", last_message)
 }
 
 
 
 
 
-#' Generate an `ebnm` function for L-GP smoothing (TMB backend)
+.fit_lgp_laplace_r <- function(x,
+                               s,
+                               LGP_setup,
+                               g_init = NULL,
+                               fix_g = FALSE,
+                               beta_fixed = NULL,
+                               beta_prec = NULL,
+                               beta_prec_missing = FALSE,
+                               fix_params = character(),
+                               link = c("identity", "log"),
+                               learn_noise = FALSE,
+                               laplace_curvature = c("observed", "fisher")) {
+  link <- match.arg(link)
+  laplace_curvature <- match.arg(laplace_curvature)
+  if (isTRUE(fix_g)) fix_params <- unique(c(fix_params, "scale"))
+  x <- as.numeric(x)
+  n <- length(x)
+  B <- Matrix::Matrix(LGP_setup$B, sparse = TRUE)
+  X <- Matrix::Matrix(LGP_setup$X, sparse = TRUE)
+  P <- Matrix::Matrix(LGP_setup$P, sparse = TRUE)
+  pX <- ncol(X)
+  if (is.null(s)) s <- rep(1, n)
+  if (length(s) == 1L) s <- rep(s, n)
+  if (length(s) != n) stop("`s` must have length 1 or length(x).")
+  if (anyNA(x) || anyNA(s)) stop("`x` and `s` must not contain NA.")
+  if (any(s <= 0)) stop("All entries of `s` must be > 0.")
+
+  beta_spec <- .eb_smoother_resolve_beta_spec(
+    beta_fixed = beta_fixed,
+    beta_prec = beta_prec,
+    g_init_beta_prec = if (is.null(g_init)) NULL else g_init$beta_prec,
+    legacy_beta_prec = if (isTRUE(beta_prec_missing)) LGP_setup$betaprec else NULL
+  )
+  beta_mode <- beta_spec$mode
+  beta_fixed_use <- if (is.null(beta_spec$beta_fixed)) {
+    NULL
+  } else {
+    .check_optional_beta_vector(beta_spec$beta_fixed, "beta_fixed", expected_length = pX, allow_null = FALSE)
+  }
+  beta_prec_use <- beta_spec$beta_prec
+  g_init_input <- g_init
+  if ("scale" %in% fix_params && (is.null(g_init_input) || is.null(g_init_input$scale))) {
+    stop("`fix_params = \"scale\"` requires `g_init$scale`.")
+  }
+  if (is.null(g_init)) {
+    g_init <- LGP(scale = 0, beta = rep(0, pX), beta_prec = beta_prec_use)
+  }
+  theta0 <- .check_single_numeric(g_init$scale, "g_init$scale")
+  beta_init <- if (!is.null(beta_fixed_use)) {
+    beta_fixed_use
+  } else if (!is.null(g_init$beta)) {
+    .check_optional_beta_vector(g_init$beta, "g_init$beta", expected_length = pX, allow_null = FALSE)
+  } else {
+    rep(0, pX)
+  }
+  noise_sd0 <- if (isTRUE(learn_noise)) stats::sd(x) else NA_real_
+  if (isTRUE(learn_noise) && (!is.finite(noise_sd0) || noise_sd0 <= 0)) noise_sd0 <- 1
+
+  beta_names <- paste0("beta", seq_len(pX))
+  par0 <- c(theta = theta0)
+  if (isTRUE(learn_noise)) par0 <- c(par0, log_noise = log(noise_sd0))
+  if (identical(beta_mode, "empirical_bayes")) {
+    par0 <- c(par0, stats::setNames(as.numeric(beta_init), beta_names))
+  }
+  fixed_names <- if ("scale" %in% fix_params) "theta" else character()
+  last_inner_mode <- NULL
+
+  eval_objective <- function(par) {
+    theta <- as.numeric(par[["theta"]])
+    s_use <- if (isTRUE(learn_noise)) rep(exp(as.numeric(par[["log_noise"]])), n) else as.numeric(s)
+    beta_value <- if (identical(beta_mode, "fixed")) {
+      beta_fixed_use
+    } else if (identical(beta_mode, "empirical_bayes")) {
+      as.numeric(par[beta_names])
+    } else {
+      beta_init
+    }
+    inner <- .lgp_laplace_inner_objective(
+      x = x,
+      s = s_use,
+      B = B,
+      X = X,
+      P = P,
+      logPdet = LGP_setup$logPdet,
+      theta = theta,
+      beta_mode = beta_mode,
+      beta_value = beta_value,
+      beta_prec = beta_prec_use,
+      beta_init = beta_init,
+      initial_mode = last_inner_mode,
+      link = link,
+      laplace_curvature = laplace_curvature
+    )
+    if (!is.null(inner$mode) && all(is.finite(inner$mode))) {
+      last_inner_mode <<- as.numeric(inner$mode)
+    }
+    inner$theta <- theta
+    inner$s <- s_use
+    inner$fitted_noise_sd <- if (isTRUE(learn_noise)) exp(as.numeric(par[["log_noise"]])) else NULL
+    inner
+  }
+  safe_objective <- function(par) {
+    objective <- tryCatch(eval_objective(par), error = function(e) e)
+    if (inherits(objective, "error")) return(1e100)
+    -objective$log_marginal
+  }
+  opt_res <- .optimize_lgp_objective(
+    par0 = par0,
+    fixed_names = fixed_names,
+    safe_objective = safe_objective,
+    eval_objective = eval_objective,
+    failure_label = "L-GP Laplace optimization failed"
+  )
+  objective <- opt_res$objective
+  log_likelihood <- structure(objective$log_marginal, class = "logLik")
+  log_likelihood_stepB_joint <- structure(objective$log_joint, class = "logLik")
+  log_likelihood_stepB_laplace <- log_likelihood
+  beta_hat <- as.numeric(objective$fitted_beta)
+  posterior_sampler <- function(nsamp) {
+    nsamp <- .check_single_numeric(nsamp, "nsamp")
+    if (nsamp < 1 || nsamp != floor(nsamp)) stop("`nsamp` must be a positive integer.")
+    samps <- LaplacesDemon::rmvnp(n = nsamp, mu = as.numeric(objective$mode), Omega = as.matrix(objective$precision))
+    if (is.null(dim(samps))) samps <- matrix(samps, nrow = 1)
+    eta_s <- as.matrix(objective$eta_design) %*% t(samps)
+    if (!isTRUE(objective$integrated_beta)) {
+      eta_s <- eta_s + as.numeric(X %*% beta_hat)
+    }
+    if (identical(link, "identity")) t(eta_s) else t(exp(eta_s))
+  }
+  fitted_g <- LGP(
+    scale = objective$theta,
+    beta = beta_hat,
+    beta_prec = if (identical(beta_mode, "prior_flat")) 0 else beta_prec_use
+  )
+  out <- list(
+    posterior = objective$posterior,
+    fitted_g = fitted_g,
+    fitted_beta = beta_hat,
+    beta_mode = beta_mode,
+    beta_prec = if (identical(beta_mode, "prior_flat")) 0 else beta_prec_use,
+    log_likelihood = log_likelihood,
+    log_likelihood_semantics = paste0(if (identical(laplace_curvature, "fisher")) "laplace_fisher_" else "laplace_", beta_mode),
+    log_likelihood_stepA = log_likelihood,
+    log_likelihood_stepB_joint = log_likelihood_stepB_joint,
+    log_likelihood_stepB_laplace = log_likelihood_stepB_laplace,
+    posterior_sampler = posterior_sampler,
+    data = data.frame(x = x, s = objective$s),
+    prior_family = paste0("LGP", if (isTRUE(learn_noise)) "_learned_noise" else ""),
+    backend = if (identical(laplace_curvature, "fisher")) "laplace_fisher" else "laplace",
+    laplace_implementation = "r",
+    laplace_curvature = laplace_curvature,
+    link = link,
+    g_init = LGP(theta0, beta = beta_init, beta_prec = if (identical(beta_mode, "prior_flat")) 0 else beta_prec_use)
+  )
+  if (isTRUE(learn_noise)) {
+    out$fitted_noise_sd <- as.numeric(objective$fitted_noise_sd)
+  }
+  out
+}
+
+#' Generate an `ebnm` function for L-GP smoothing
 #'
 #' @description
 #' Returns a function with signature
-#' \code{function(x, s, g_init = NULL, fix_g = FALSE, beta_fixed = NULL, output = NULL)}
-#' that fits an L-GP smoother using a unified TMB objective.
+#' \code{function(x, s, g_init = NULL, fix_g = FALSE, beta_fixed = NULL, beta_prec = NULL, fix_params = character(), output = NULL)}
+#' that fits an L-GP smoother.
+#'
+#' This is the recommended public interface when the observation standard
+#' errors \code{s} are known and you want an \code{ebnm}-compatible L-GP
+#' smoother, for example inside \code{flashier} or \code{ebmf}. If the
+#' standard errors are unknown and you want to learn one common noise SD
+#' instead, use \code{\link{eb_smoother}} with \code{family = "lgp"} and
+#' \code{s = NULL}.
 #'
 #' The fitted latent linear predictor is
 #' \deqn{\eta = B U + X \beta,}
@@ -193,32 +621,55 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
 #'     a log-normal moment transform.
 #' }
 #'
+#' For \code{link = "log"}, \code{backend = "auto"} uses
+#' \code{"laplace_fisher"}. This keeps the conditional mode equal to the mode
+#' of the original log posterior and replaces only the Laplace posterior
+#' precision/log-determinant observation curvature by the Fisher/Gauss-Newton
+#' curvature. Explicit \code{backend = "laplace"} retains observed-Hessian
+#' Laplace semantics.
+#'
 #' @details
 #' \strong{Link handling.}
 #' The \code{link} argument here \emph{overrides} \code{LGP_setup$link_id} if present.
 #' This is intentional so the caller can reuse a setup object while changing the link.
 #'
 #' \strong{Step A / Step B estimation logic.}
-#' The behavior is controlled by \code{LGP_setup$betaprec}:
+#' The public \code{beta} semantics are:
 #' \itemize{
-#'   \item \code{betaprec < 0} (EB mode for \code{beta}):
+#'   \item \code{beta_fixed}: treat \code{beta} as known.
+#'   \item \code{beta_prec = NULL}: estimate \code{beta} by empirical Bayes.
+#'   \item \code{beta_prec = 0}: use a flat zero-mean Gaussian prior on \code{beta}.
+#'   \item \code{beta_prec > 0}: use a proper zero-mean Gaussian prior on \code{beta}.
+#' }
+#'
+#' When \code{beta_prec} is not supplied, the fitter falls back to the legacy
+#' \code{LGP_setup$betaprec} field so older code continues to work.
+#'
+#' With these semantics, the internal Step A / Step B logic becomes:
+#' \itemize{
+#'   \item empirical-Bayes \code{beta}:
 #'     \enumerate{
 #'       \item Step A: integrate out \code{U} (Laplace) and optimize \code{(theta, beta)}.
 #'       \item Step B: fix \code{(theta, beta)} at the Step A estimates and infer \code{U}.
 #'     }
-#'   \item \code{betaprec >= 0}:
+#'   \item fixed / flat-prior / proper-prior \code{beta}:
 #'     \enumerate{
 #'       \item Step A: integrate out \code{U} and \code{beta} and optimize \code{theta}.
 #'       \item Step B: fix \code{theta} and infer \code{(U, beta)} jointly.
 #'     }
 #' }
 #'
-#' \strong{Fixed-hyperparameter mode.}
-#' If \code{fix_g = TRUE}, the smoothing parameter \code{theta} is fixed at
-#' \code{g_init$scale} and the global coefficients \code{beta} are fixed at
-#' \code{beta_fixed}. If \code{beta_fixed} is \code{NULL}, the fitter uses a
-#' zero vector of length \code{ncol(LGP_setup$X)}. In this mode, Step B only
-#' infers the local coefficients \code{U}; it never re-estimates \code{beta}.
+#' \strong{Initialization and fixed-beta handling.}
+#' \code{g_init$beta}, when supplied, is treated as an initialization value for
+#' the global coefficients and is stored in the returned fit state. It is not a
+#' prior mean. Supplying \code{beta_fixed} fixes \code{beta} at that value
+#' regardless of whether \code{fix_g} is \code{TRUE} or \code{FALSE}. When
+#' \code{fix_g = TRUE}, \code{theta} is held fixed at \code{g_init$scale}.
+#' The returned function also accepts \code{fix_params}. Allowed values are
+#' \code{"scale"} and \code{"beta"}. Fixed scale uses
+#' \code{g_init$scale}, fixed beta uses \code{beta_fixed} when supplied or
+#' otherwise \code{g_init$beta}, and \code{fix_g = TRUE} is retained as a
+#' shortcut for \code{fix_params = "scale"}.
 #'
 #' \strong{Log-likelihood outputs.}
 #' The returned object includes multiple log-likelihood-style quantities:
@@ -240,17 +691,35 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
 #'   \code{X}, \code{B}, \code{P}, \code{logPdet}, and \code{betaprec}.
 #' @param link Either \code{"identity"} or \code{"log"}. This argument overrides
 #'   \code{LGP_setup$link_id} if present.
+#' @param backend Backend choice. \code{"auto"} uses \code{"tmb"} for
+#'   \code{link = "identity"} and \code{"laplace_fisher"} for
+#'   \code{link = "log"}. \code{"laplace"} uses the R observed-Hessian
+#'   Laplace backend. \code{"laplace_fisher"} is available only for
+#'   \code{link = "log"}.
 #' @param dll Compiled TMB DLL name (default \code{"EBSmoothr"}).
 #'
 #' @return A function that returns an object of class \code{"ebnm"} (and \code{"list"}).
-#'   The returned object includes posterior mean/variance, fitted hyperparameters,
-#'   and the log-likelihood diagnostics described above.
+#'   The closure has signature
+#'   \code{function(x, s, g_init = NULL, fix_g = FALSE, beta_fixed = NULL, beta_prec = NULL, fix_params = character(), output = NULL)}.
+#'   The returned fit includes posterior mean/variance, fitted hyperparameters,
+#'   fitted/fixed \code{beta}, the resolved \code{g_init}, and the log-likelihood
+#'   diagnostics described above.
 #'
 #' @export
 ebnm_LGP_generator <- function(LGP_setup,
                                link = c("identity", "log"),
+                               backend = c("auto", "tmb", "laplace", "laplace_fisher"),
                                dll = "EBSmoothr") {
   link <- match.arg(link)
+  backend <- match.arg(backend)
+  backend_use <- if (identical(backend, "auto")) {
+    if (identical(link, "log")) "laplace_fisher" else "tmb"
+  } else {
+    backend
+  }
+  if (identical(backend_use, "laplace_fisher") && !identical(link, "log")) {
+    stop("`backend = \"laplace_fisher\"` is only available for `link = \"log\"`.")
+  }
 
   .check_numeric_scalar <- function(z, nm) {
     if (!is.numeric(z) || length(z) != 1L || is.na(z)) {
@@ -298,16 +767,21 @@ ebnm_LGP_generator <- function(LGP_setup,
     do.call(cbind, cols)
   }
 
-  ebnm_gp <- function(x, s, g_init = NULL, fix_g = FALSE, beta_fixed = NULL, output = NULL) {
+  ebnm_gp <- function(x,
+                      s,
+                      g_init = NULL,
+                      fix_g = FALSE,
+                      beta_fixed = NULL,
+                      beta_prec = NULL,
+                      fix_params = character(),
+                      output = NULL) {
 
-    # ---- basic checks ----
     if (is.null(LGP_setup$X) || is.null(LGP_setup$B) || is.null(LGP_setup$P)) {
       stop("LGP_setup must contain X, B, and P.")
     }
 
     n <- length(x)
     if (nrow(LGP_setup$X) != n || nrow(LGP_setup$B) != n) {
-      # ebnm sometimes probes with length-3 init
       if (length(s) == 3 && length(x) == 3) return(ebnm::ebnm_flat(x))
       stop("length(x) must match nrow(X) and nrow(B) in LGP_setup.")
     }
@@ -316,58 +790,116 @@ ebnm_LGP_generator <- function(LGP_setup,
     if (length(s) == 1L) s <- rep(s, n)
     if (anyNA(x) || anyNA(s)) stop("x and s must not contain NA.")
     if (any(s <= 0)) stop("All entries of s must be > 0.")
+    if (!is.logical(fix_g) || length(fix_g) != 1L || is.na(fix_g)) {
+      stop("`fix_g` must be TRUE or FALSE.")
+    }
 
-    # ---- TMB data ----
     tmbdat <- LGP_setup
     tmbdat$x <- as.numeric(x)
     tmbdat$s <- as.numeric(s)
     tmbdat$link_id <- as.integer(link_id_arg)
-
-    betaprec <- .check_numeric_scalar(tmbdat$betaprec, "betaprec")
+    tmbdat$learn_noise <- 0L
+    tmbdat$model_id <- 0L
 
     pB <- ncol(tmbdat$B)
     pX <- ncol(tmbdat$X)
-
-    if (is.null(g_init)) g_init <- LGP(0)
-    theta0 <- .check_numeric_scalar(g_init$scale, "g_init$scale")
-
-    if (!fix_g && !is.null(beta_fixed)) {
-      stop("`beta_fixed` can only be supplied when `fix_g = TRUE`.")
+    beta_prec_supplied <- !missing(beta_prec)
+    fix_params_use <- .normalize_fix_params(
+      fix_params = fix_params,
+      allowed = c("scale", "beta"),
+      fix_g = fix_g,
+      fix_g_params = "scale",
+      nm = "fix_params"
+    )
+    if ("scale" %in% fix_params_use && (is.null(g_init) || is.null(g_init$scale))) {
+      stop("`fix_params = \"scale\"` requires `g_init$scale`.")
     }
-    if (fix_g) {
-      if (is.null(beta_fixed)) {
-        beta_fixed_use <- rep(0, pX)
-      } else {
-        if (!is.numeric(beta_fixed) || length(beta_fixed) != pX || anyNA(beta_fixed)) {
-          stop("`beta_fixed` must be a numeric vector of length ncol(LGP_setup$X) with no NA.")
-        }
-        beta_fixed_use <- as.numeric(beta_fixed)
-      }
-    } else {
-      beta_fixed_use <- NULL
-    }
-
-    # Parameter template required by the unified C++ objective
-    par0 <- list(
-      theta = theta0,
-      U    = rep(0, pB),
-      beta = rep(0, pX)
+    beta_fixed <- .resolve_fixed_beta_from_fix_params(
+      fix_params = fix_params_use,
+      beta_fixed = beta_fixed,
+      beta_prec = beta_prec,
+      beta_prec_supplied = beta_prec_supplied,
+      g_init = g_init,
+      expected_length = pX
     )
 
-    # ============================================================
-    # Step A
-    #   betaprec >= 0: integrate out (U, beta), optimize theta only
-    #   betaprec <  0: integrate out U, optimize (theta, beta)
-    # Primary logLik is Step A integrated objective: -optA$value
-    # (matches EBMFSmooth's returned log_likelihood).
-    # ============================================================
+    if (identical(backend_use, "laplace_fisher") || length(fix_params_use) > 0L) {
+      fit <- .fit_lgp_laplace_r(
+        x = x,
+        s = s,
+        LGP_setup = LGP_setup,
+        g_init = g_init,
+        fix_g = fix_g,
+        beta_fixed = beta_fixed,
+        beta_prec = beta_prec,
+        beta_prec_missing = !beta_prec_supplied,
+        fix_params = fix_params_use,
+        link = link,
+        learn_noise = FALSE,
+        laplace_curvature = if (identical(backend_use, "laplace_fisher")) "fisher" else "observed"
+      )
+      return(structure(fit, class = c("list", "ebnm")))
+    }
+
+    beta_spec <- .eb_smoother_resolve_beta_spec(
+      beta_fixed = beta_fixed,
+      beta_prec = beta_prec,
+      g_init_beta_prec = if (is.null(g_init)) NULL else g_init$beta_prec,
+      legacy_beta_prec = if (missing(beta_prec)) tmbdat$betaprec else NULL
+    )
+    beta_mode <- beta_spec$mode
+    beta_fixed_use <- if (is.null(beta_spec$beta_fixed)) {
+      NULL
+    } else {
+      .check_optional_beta_vector(
+        beta_spec$beta_fixed,
+        "beta_fixed",
+        expected_length = pX,
+        allow_null = FALSE
+      )
+    }
+    beta_prec_use <- beta_spec$beta_prec
+    betaprec_internal <- if (beta_mode == "empirical_bayes") -1 else beta_prec_use
+    tmbdat$betaprec <- if (is.null(betaprec_internal)) -1 else betaprec_internal
+
+    if (is.null(g_init)) {
+      g_init <- LGP(scale = 0, beta = rep(0, pX), beta_prec = beta_prec_use)
+    }
+    theta0 <- .check_numeric_scalar(g_init$scale, "g_init$scale")
+    beta_init <- if (!is.null(beta_fixed_use)) {
+      beta_fixed_use
+    } else if (!is.null(g_init$beta)) {
+      .check_optional_beta_vector(g_init$beta, "g_init$beta", expected_length = pX, allow_null = FALSE)
+    } else {
+      rep(0, pX)
+    }
+
+    par0 <- list(
+      theta = theta0,
+      U = rep(0, pB),
+      beta = as.numeric(beta_init),
+      log_noise = 0
+    )
+
     fitted_theta <- theta0
-    fitted_beta  <- rep(0, pX)
+    fitted_beta <- as.numeric(beta_init)
     ll_stepA <- NA_real_
 
     if (!fix_g) {
-      if (betaprec < 0) {
-        # Integrate out U, jointly optimize theta and beta
+      if (beta_mode == "fixed") {
+        objA <- TMB::MakeADFun(
+          data = tmbdat,
+          parameters = within(par0, beta <- as.numeric(beta_fixed_use)),
+          map = list(beta = factor(rep(NA, pX)), log_noise = factor(NA)),
+          DLL = dll,
+          random = "U",
+          silent = TRUE
+        )
+        optA <- optim(par = objA$par, fn = objA$fn, gr = objA$gr, method = "BFGS")
+        ll_stepA <- -as.numeric(optA$value)
+        fitted_theta <- as.numeric(optA$par[["theta"]])
+        fitted_beta <- as.numeric(beta_fixed_use)
+      } else if (betaprec_internal < 0) {
         objA <- TMB::MakeADFun(
           data = tmbdat,
           parameters = par0,
@@ -376,21 +908,14 @@ ebnm_LGP_generator <- function(LGP_setup,
           silent = TRUE
         )
         optA <- optim(par = objA$par, fn = objA$fn, gr = objA$gr, method = "BFGS")
-
         ll_stepA <- -as.numeric(optA$value)
-
-        if (!("theta" %in% names(optA$par))) stop("Step A: 'theta' not found in optA$par.")
         fitted_theta <- as.numeric(optA$par[["theta"]])
-
-        # IMPORTANT: beta appears with repeated names ("beta","beta",...)
         beta_idx <- which(names(optA$par) == "beta")
         if (length(beta_idx) != pX) {
           stop(sprintf("Step A: expected %d beta entries, got %d.", pX, length(beta_idx)))
         }
         fitted_beta <- as.numeric(optA$par[beta_idx])
-
       } else {
-        # Integrate out (U, beta), optimize theta only
         objA <- TMB::MakeADFun(
           data = tmbdat,
           parameters = par0,
@@ -399,40 +924,25 @@ ebnm_LGP_generator <- function(LGP_setup,
           silent = TRUE
         )
         optA <- optim(par = objA$par, fn = objA$fn, gr = objA$gr, method = "BFGS")
-
         ll_stepA <- -as.numeric(optA$value)
-
-        if (!("theta" %in% names(optA$par))) stop("Step A: 'theta' not found in optA$par.")
         fitted_theta <- as.numeric(optA$par[["theta"]])
-
-        # beta is integrated out here; we will estimate it in Step B.
         fitted_beta <- rep(0, pX)
       }
-    } else {
-      # If g is fixed, we do not optimize in Step A.
-      fitted_theta <- theta0
-      fitted_beta  <- beta_fixed_use
     }
 
-    fitted_g <- LGP(fitted_theta)
+    fixed_theta_and_beta <- identical(beta_mode, "fixed") || (!fix_g && betaprec_internal < 0)
 
-    # ============================================================
-    # Step B
-    #   betaprec >= 0: fix theta; infer (U, beta) jointly
-    #   betaprec <  0: fix theta and beta; infer U only
-    # We compute Step B joint and Laplace-corrected values for diagnostics.
-    # IMPORTANT: StepB_laplace uses OLD-style logdet to match EBMFSmooth.
-    # ============================================================
-    if (fix_g || betaprec < 0) {
-      # Fix theta AND beta, infer U only
+    if (fixed_theta_and_beta) {
       mapB <- list(
         theta = factor(NA),
-        beta  = factor(rep(NA, pX))
+        beta = factor(rep(NA, pX)),
+        log_noise = factor(NA)
       )
       parB <- list(
         theta = as.numeric(fitted_theta),
-        U    = rep(0, pB),
-        beta = as.numeric(fitted_beta)
+        U = rep(0, pB),
+        beta = as.numeric(if (beta_mode == "fixed") beta_fixed_use else fitted_beta),
+        log_noise = 0
       )
 
       ff <- TMB::MakeADFun(
@@ -450,28 +960,20 @@ ebnm_LGP_generator <- function(LGP_setup,
         control = list(eval.max = 20000, iter.max = 20000)
       )
 
-      if (length(optB$par) != pB) {
-        stop(sprintf("Step B: expected %d free params (U only), got %d.", pB, length(optB$par)))
-      }
-
       H <- numDeriv::hessian(function(w) ff$fn(w), optB$par)
       prec <- Matrix::forceSymmetric(H)
-
       U_hat <- as.numeric(optB$par)
-      beta_hat <- as.numeric(fitted_beta)
-
+      beta_hat <- as.numeric(if (beta_mode == "fixed") beta_fixed_use else fitted_beta)
       eta_mean <- as.numeric(tmbdat$B %*% U_hat + tmbdat$X %*% beta_hat)
-      eta_var  <- .compute_diag_A_Qinv_At(tmbdat$B, prec)
-
+      eta_var <- .compute_diag_A_Qinv_At(tmbdat$B, prec)
       free_dim <- pB
-
     } else {
-      # Fix theta only, infer (U, beta) jointly
-      mapB <- list(theta = factor(NA))
+      mapB <- list(theta = factor(NA), log_noise = factor(NA))
       parB <- list(
         theta = as.numeric(fitted_theta),
-        U    = rep(0, pB),
-        beta = rep(0, pX)
+        U = rep(0, pB),
+        beta = rep(0, pX),
+        log_noise = 0
       )
 
       ff <- TMB::MakeADFun(
@@ -489,72 +991,45 @@ ebnm_LGP_generator <- function(LGP_setup,
         control = list(eval.max = 20000, iter.max = 20000)
       )
 
-      if (length(optB$par) != (pB + pX)) {
-        stop(sprintf("Step B: expected %d free params (U+beta), got %d.",
-                     pB + pX, length(optB$par)))
-      }
-
       H <- numDeriv::hessian(function(w) ff$fn(w), optB$par)
       prec <- Matrix::forceSymmetric(H)
-
       par_names <- names(optB$par)
       u_idx <- which(par_names == "U")
       b_idx <- which(par_names == "beta")
-      if (length(u_idx) != pB || length(b_idx) != pX) {
-        stop("Step B: unexpected names/lengths in optB$par (expect pB 'U' and pX 'beta').")
-      }
-
       U_hat <- as.numeric(optB$par[u_idx])
       beta_hat <- as.numeric(optB$par[b_idx])
-
       eta_mean <- as.numeric(tmbdat$B %*% U_hat + tmbdat$X %*% beta_hat)
-
       A <- .build_A_in_par_order(tmbdat$B, tmbdat$X, par_names)
       eta_var <- .compute_diag_A_Qinv_At(A, prec)
-
       free_dim <- pB + pX
     }
 
-    # ---- transform moments according to link ----
     if (tmbdat$link_id == 0L) {
       post_mean <- eta_mean
-      post_var  <- eta_var
+      post_var <- eta_var
     } else {
       post_mean <- exp(eta_mean + 0.5 * eta_var)
-      post_var  <- exp(2 * eta_mean + eta_var) * (exp(eta_var) - 1)
+      post_var <- exp(2 * eta_mean + eta_var) * (exp(eta_var) - 1)
     }
 
     posterior <- data.frame(mean = as.numeric(post_mean), var = as.numeric(post_var))
     posterior$second_moment <- posterior$mean^2 + posterior$var
 
-    # ---- Step B diagnostics: joint and Laplace-corrected values ----
     ll_stepB_joint <- -ff$fn(optB$par)
-
-    # OLD-style logdet here (matches EBMFSmooth behavior)
     ll_stepB_laplace <- ll_stepB_joint - 0.5 * .compute_logdet_spd(prec) +
       0.5 * free_dim * log(2 * pi)
 
     class(ll_stepB_joint) <- "logLik"
     class(ll_stepB_laplace) <- "logLik"
 
-    # ---- Primary logLik returned ----
-    # Match old package: return Step A integrated objective (-optA$value) when available.
-    # If fix_g = TRUE (no Step A), fall back to Step B laplace.
-    if (is.finite(ll_stepA)) {
-      log_likelihood <- ll_stepA
-    } else {
-      log_likelihood <- as.numeric(ll_stepB_laplace)
-    }
+    log_likelihood <- if (is.finite(ll_stepA)) ll_stepA else as.numeric(ll_stepB_laplace)
     class(log_likelihood) <- "logLik"
 
     posterior_sampler <- function(nsamp) {
       samps <- LaplacesDemon::rmvnp(n = nsamp, mu = as.numeric(optB$par), Omega = as.matrix(prec))
-      if (fix_g || betaprec < 0) {
-        # sample U only
-        U_s <- samps
-        eta_s <- as.matrix(tmbdat$B) %*% t(U_s) + as.matrix(tmbdat$X) %*% beta_hat
+      if (fixed_theta_and_beta) {
+        eta_s <- as.matrix(tmbdat$B) %*% t(samps) + as.matrix(tmbdat$X) %*% beta_hat
       } else {
-        # sample (U, beta) in the same order as optB$par
         par_names <- names(optB$par)
         A <- .build_A_in_par_order(tmbdat$B, tmbdat$X, par_names)
         eta_s <- as.matrix(A) %*% t(samps)
@@ -562,20 +1037,35 @@ ebnm_LGP_generator <- function(LGP_setup,
       if (tmbdat$link_id == 0L) t(eta_s) else t(exp(eta_s))
     }
 
-    result <- list(
-      posterior = posterior,
-      fitted_g = fitted_g,
-      fitted_beta = beta_hat,
-      log_likelihood = log_likelihood,                  # aligned to old package (Step A)
-      log_likelihood_stepA = structure(ll_stepA, class = "logLik"),
-      log_likelihood_stepB_joint = ll_stepB_joint,      # diagnostic
-      log_likelihood_stepB_laplace = ll_stepB_laplace,  # diagnostic (old-style logdet)
-      posterior_sampler = posterior_sampler,
-      data = data.frame(x = x, s = s),
-      prior_family = "LGP"
+    fitted_g <- LGP(
+      scale = fitted_theta,
+      beta = beta_hat,
+      beta_prec = if (beta_mode == "prior_flat") 0 else beta_prec_use
     )
 
-    structure(result, class = c("list", "ebnm"))
+    structure(
+      list(
+        posterior = posterior,
+        fitted_g = fitted_g,
+        fitted_beta = beta_hat,
+        beta_mode = beta_mode,
+        beta_prec = if (beta_mode == "prior_flat") 0 else beta_prec_use,
+        log_likelihood = log_likelihood,
+        log_likelihood_semantics = paste0("laplace_", beta_mode),
+        log_likelihood_stepA = structure(ll_stepA, class = "logLik"),
+        log_likelihood_stepB_joint = ll_stepB_joint,
+        log_likelihood_stepB_laplace = ll_stepB_laplace,
+        posterior_sampler = posterior_sampler,
+        data = data.frame(x = x, s = s),
+        prior_family = "LGP",
+        backend = if (identical(backend_use, "laplace")) "laplace" else "tmb",
+        laplace_implementation = "tmb",
+        laplace_curvature = "observed",
+        link = link,
+        g_init = LGP(theta0, beta = beta_init, beta_prec = if (beta_mode == "prior_flat") 0 else beta_prec_use)
+      ),
+      class = c("list", "ebnm")
+    )
   }
 
   ebnm_gp

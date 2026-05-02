@@ -4,7 +4,7 @@
 \alias{Matern}
 \title{Define the Matern GP Family}
 \usage{
-Matern(theta = NULL, sigma = 1)
+Matern(theta = NULL, sigma = 1, beta = NULL, beta_prec = NULL)
 }
 \arguments{
 \item{theta}{Numeric scalar. Log-transformed range parameter. Defaults to
@@ -12,6 +12,12 @@ Matern(theta = NULL, sigma = 1)
 
 \item{sigma}{Numeric scalar. Latent-field marginal standard deviation on the
 natural scale. Defaults to \code{1}.}
+
+\item{beta}{Optional scalar intercept state stored alongside the Matern
+hyperparameters.}
+
+\item{beta_prec}{Optional non-negative scalar beta prior precision stored
+alongside the Matern hyperparameters.}
 }
 \value{
 An object of class \code{"Matern"}.

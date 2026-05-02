@@ -6,3 +6,5 @@
 ^src/\.DS_Store$
 ^src/.*\.(o|so|dll|dylib)$
 ^src/.*\.rds$
+^\.positai$
+^\.claude$

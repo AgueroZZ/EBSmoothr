@@ -15,15 +15,18 @@ LGP_setup(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
 \item{num_knots}{Integer number of knots used to build the local basis
 (default \code{30}).}
 
-\item{betaprec}{Numeric scalar controlling the prior precision on the
+\item{betaprec}{Numeric scalar controlling the legacy fallback precision on the
 global coefficients \code{beta}:
 \itemize{
-  \item \code{betaprec > 0}: proper Gaussian prior with precision \code{betaprec}.
-  \item \code{betaprec = 0}: diffuse (improper/flat) prior on \code{beta}.
-  \item \code{betaprec < 0}: empirical-Bayes mode for \code{beta}
-    (optimized rather than treated as random in Step A; see
-    \code{\link{ebnm_LGP_generator}}).
-}}
+\item \code{betaprec > 0}: proper Gaussian prior with precision \code{betaprec}.
+\item \code{betaprec = 0}: diffuse (improper/flat) prior on \code{beta}.
+\item \code{betaprec < 0}: empirical-Bayes mode for \code{beta}
+(optimized rather than treated as random in Step A; see
+\code{\link{ebnm_LGP_generator}}).
+}
+This value is retained for backward compatibility. New code should prefer
+the public \code{beta_prec} argument on \code{\link{ebnm_LGP_generator}}
+and \code{\link{eb_smoother}}.}
 
 \item{link}{Either \code{"identity"} or \code{"log"}. This value is stored
 as \code{link_id} in the returned object for convenience; the final
@@ -32,17 +35,20 @@ link used by the fitter is determined by the \code{link} argument in
 }
 \value{
 A list containing the sparse matrices \code{X}, \code{B}, \code{P},
-  and additional scalars used by the TMB objective:
-  \itemize{
-    \item \code{logPdet}: \eqn{\log|P|} for the penalty/precision component.
-    \item \code{betaprec}: the value supplied via \code{betaprec}.
-    \item \code{link_id}: integer encoding of the requested link (\code{0} identity, \code{1} log).
-  }
+and additional scalars used by the TMB objective:
+\itemize{
+\item \code{logPdet}: \eqn{\log|P|} for the penalty/precision component.
+\item \code{betaprec}: the value supplied via \code{betaprec}.
+\item \code{link_id}: integer encoding of the requested link (\code{0} identity, \code{1} log).
+\item \code{model_id}: internal TMB objective selector; \code{0} for L-GP.
+}
 }
 \description{
 Precomputes the design matrices and penalty components used by the
-L-GP smoother. The returned list is intended to be passed to
-\code{\link{ebnm_LGP_generator}}.
+L-GP smoother. The returned list can be passed directly to
+\code{\link{ebnm_LGP_generator}} for known-standard-error workflows, or
+reused through \code{\link{eb_smoother}} with
+\code{family = "lgp"}.
 
 The model uses a global polynomial basis \code{X} (degree \code{p-1})
 and a local spline-like basis \code{B}. The local coefficients are

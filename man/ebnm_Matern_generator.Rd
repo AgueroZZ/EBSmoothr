@@ -2,21 +2,29 @@
 % Please edit documentation in R/02_Matern.R
 \name{ebnm_Matern_generator}
 \alias{ebnm_Matern_generator}
-\title{Generate an `ebnm` function for Matern smoothing}
+\title{Generate an \code{ebnm} function for Matern smoothing}
 \usage{
 ebnm_Matern_generator(
-  locations,
+  locations = NULL,
+  setup = NULL,
   max.edge = NULL,
   alpha = 2,
   suppress_warnings = TRUE,
   penalty_range = NULL,
   pc.penalty = NULL,
   compute_exact_diagnostic = FALSE,
+  backend = c("auto", "exact", "laplace", "laplace_fisher", "laplace_r", "inla"),
   link = c("identity", "log", "logit", "probit")
 )
 }
 \arguments{
-\item{locations}{Spatial locations.}
+\item{locations}{Optional raw locations used to build the Matern mesh and
+projector matrix. Supply either \code{locations} or \code{setup}, but not
+both.}
+
+\item{setup}{Optional reusable object returned by
+\code{\link{Matern_setup}}. Supply either \code{locations} or
+\code{setup}, but not both.}
 
 \item{max.edge}{Mesh maximum edge length.}
 
@@ -30,42 +38,79 @@ SPDE construction.}
 missing. If \code{NULL}, defaults to roughly one-tenth of the spatial
 extent.}
 
-\item{pc.penalty}{Optional list specifying PC priors for the INLA backend.
+\item{pc.penalty}{Optional list specifying PC priors for the Matern
+hyperparameters.
 Supported entries are \code{range} and \code{sigma}. Each entry may be a
 numeric vector of length 1, interpreted as the anchor with default tail
 probability \code{0.5}, or length 2, interpreted as \code{c(anchor, alpha)}.
 Missing entries default to a data-driven anchor and tail probability
-\code{0.5}. If \code{NULL}, the exact Gaussian EB backend is used.}
+\code{0.5}. If \code{NULL}, the Matern hyperparameters are fit by
+unpenalized EB.}
 
-\item{compute_exact_diagnostic}{Logical scalar. If \code{TRUE} and
-\code{pc.penalty} is supplied with \code{fix_g = FALSE}, also evaluate the
-manual exact Gaussian log-likelihood at the fitted INLA Step A mode and
-store it in \code{log_likelihood_exact_at_stepA_mode}. Defaults to
-\code{FALSE}.}
+\item{compute_exact_diagnostic}{Logical scalar retained for compatibility.
+Identity-link INLA fits now store the package exact objective at the INLA
+mode as their primary \code{log_likelihood}; log-link INLA fits store the
+package Laplace objective at the INLA mode.}
 
-\item{link}{Backward-compatible link argument. Only \code{"identity"} is
-supported by the current Matern implementation.}
+\item{backend}{Backend choice. \code{"auto"} uses \code{"exact"} for the
+identity link and \code{"laplace_fisher"} for the log link.
+\code{"laplace_fisher"} is available only for \code{link = "log"}.
+\code{"laplace"} uses the observed-Hessian TMB implementation when
+supported, falling back to the observed-Hessian R reference implementation
+otherwise. \code{"laplace_fisher"} uses the same TMB mode and
+hyperparameter fit when supported, but builds the returned posterior
+approximation and Fisher Laplace score with Fisher/Gauss-Newton curvature.
+\code{"laplace_r"} forces the observed-Hessian R reference implementation.
+\code{"inla"} is the independent INLA implementation and uses the supplied
+\code{pc.penalty}, if any, as the source of PC-prior penalization.
+Compatibility aliases \code{"laplace_tmb"} and \code{"inla_pc"} are still
+accepted.}
+
+\item{link}{Link function. \code{"identity"} fits unconstrained Gaussian
+means. \code{"log"} fits positive mean functions and reports posterior
+summaries on the positive response scale. \code{"logit"} and
+\code{"probit"} are reserved and currently unsupported.}
 }
 \value{
 A function with signature
-  \code{function(x, s, g_init = NULL, fix_g = FALSE, beta_fixed = NULL, output = NULL)}.
-  The returned object includes posterior summaries, fitted hyperparameters,
-  backend-specific likelihood diagnostics, the mesh, and a summary of the
-  latent spatial field.
+\code{function(x, s, g_init = NULL, fix_g = FALSE, beta_fixed = NULL, beta_prec = NULL, fix_params = character(), output = NULL)}.
+The returned object includes posterior summaries, fitted hyperparameters,
+fitted/fixed \code{beta}, the resolved \code{g_init}, backend-specific
+likelihood diagnostics, the mesh, and a summary of the latent spatial
+field.
+
+The returned function accepts \code{fix_params} for partial parameter
+fixing. Allowed values are \code{"range"}, \code{"sigma"}, and
+\code{"beta"}. Fixed range uses \code{g_init$theta}, fixed sigma uses
+\code{g_init$sigma}, and fixed beta uses \code{beta_fixed} when supplied or
+otherwise \code{g_init$beta}. \code{fix_g = TRUE} is retained as a shortcut
+for \code{fix_params = c("range", "sigma")}. Range/sigma fixing is not
+supported by the INLA backend.
 }
 \description{
 Returns an \code{ebnm}-compatible function that fits a stationary Matern
 smoother in one or two spatial dimensions.
 
-- If \code{locations} is a numeric vector, it is treated as one-dimensional
-  locations.
-- If \code{locations} is a matrix or data frame, it must have one or two
-  columns.
+This is the recommended public interface when the observation standard
+errors \code{s} are known and you want a spatial \code{ebnm} workflow. If
+the standard errors are unknown and you want to learn one common noise SD
+instead, use \code{\link{eb_smoother}} with \code{family = "matern"} and
+\code{s = NULL}.
+\itemize{
+\item If \code{locations} is a numeric vector, it is treated as one-dimensional
+locations.
+\item If \code{locations} is a matrix or data frame, it must have one or two
+columns.
+\item Alternatively, callers may supply a reusable \code{setup} object returned
+by \code{\link{Matern_setup}}.
+}
 
-The current implementation supports the Gaussian normal-means case with the
-identity link only. The public \code{link} argument is retained for backward
-compatibility, but any value other than \code{"identity"} results in an
-error.
+The identity link uses the exact Gaussian backend by default. The log link
+supports positive mean functions by fitting
+\eqn{x_i \sim N(\exp(\beta_0 + (Aw)_i), s_i^2)} with a sparse Fisher
+Laplace backend by default, and an independent INLA backend is available for
+cross-checking. INLA empirical-Bayes beta fits are implemented by external
+profiling over fixed-beta INLA offset fits.
 }
 \details{
 Let \eqn{w} denote the latent Matern field on the mesh and \eqn{A} the
@@ -90,22 +135,31 @@ where \eqn{D = \mathrm{diag}(s_1^2, \ldots, s_n^2)},
 \eqn{r = x - \beta_0}, \eqn{b = A^T D^{-1} r}, and
 \eqn{Q_{post} = Q + A^T D^{-1} A}.
 
-If \code{pc.penalty = NULL}, the fitter uses the exact Gaussian
-empirical-Bayes implementation and maximizes the exact marginal likelihood
-over \code{(log(range), log(sigma), beta0)} using
-\code{\link[stats:optim]{optim}} with method \code{"BFGS"}.
+The public beta semantics are:
+\itemize{
+\item \code{beta_fixed}: treat \eqn{\beta_0} as known.
+\item \code{beta_prec = NULL}: estimate \eqn{\beta_0} by empirical Bayes.
+\item \code{beta_prec = 0}: use a flat prior on \eqn{\beta_0}.
+\item \code{beta_prec > 0}: use a proper zero-mean Gaussian prior on \eqn{\beta_0}.
+}
 
-If \code{pc.penalty} is supplied, the fitter switches to an INLA backend
-using \code{\link[INLA:inla.spde2.pcmatern]{inla.spde2.pcmatern()}}.
-With \code{fix_g = FALSE}, the primary \code{log_likelihood} is then the
-Step A penalized objective \code{resA$misc$log.posterior.mode}. With
-\code{fix_g = TRUE}, the primary \code{log_likelihood} is a penalized
-pseudo-objective equal to the Step B conditional marginal likelihood plus
-the PC prior log-density on the internal \code{(log(range), log(sigma))}
-scale.
+For identity-link fits, the primary \code{log_likelihood} is the package
+exact Gaussian objective for every backend. INLA-backed identity fits report
+that exact objective evaluated at the INLA mode, with INLA's native Step A
+quantities retained as diagnostics.
 
-By default, the INLA PC-prior path does \emph{not} automatically recompute
-the exact Gaussian objective at the fitted Step A mode. That cross-check can
-be enabled with \code{compute_exact_diagnostic = TRUE}, or performed later by
-calling \code{\link{matern_objective_breakdown}} on the fitted object.
+For log-link fits, \code{backend = "auto"} uses \code{"laplace_fisher"}.
+This keeps the conditional mode equal to the mode of the original log
+posterior and replaces only the Laplace posterior precision/log-determinant
+observation curvature by the Fisher/Gauss-Newton curvature. For log-link
+normal observations this replaces
+\eqn{\exp(\eta_i)(2\exp(\eta_i)-x_i)/s_i^2} by
+\eqn{\exp(2\eta_i)/s_i^2}. Explicit \code{backend = "laplace"},
+\code{"laplace_r"}, and \code{"laplace_tmb"} retain observed-Hessian
+Laplace semantics. Fisher fits report
+\code{backend = "laplace_fisher"}, \code{laplace_curvature = "fisher"}, and
+\code{log_likelihood_semantics = "laplace_fisher_<beta_mode>"}.
+INLA-backed log-link fits report the observed-Hessian Laplace objective
+evaluated at the INLA mode, with INLA's native marginal likelihood
+quantities retained as diagnostics.
 }

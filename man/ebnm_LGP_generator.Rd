@@ -2,9 +2,14 @@
 % Please edit documentation in R/01_LGP.R
 \name{ebnm_LGP_generator}
 \alias{ebnm_LGP_generator}
-\title{Generate an `ebnm` function for L-GP smoothing (TMB backend)}
+\title{Generate an \code{ebnm} function for L-GP smoothing}
 \usage{
-ebnm_LGP_generator(LGP_setup, link = c("identity", "log"), dll = "EBSmoothr")
+ebnm_LGP_generator(
+  LGP_setup,
+  link = c("identity", "log"),
+  backend = c("auto", "tmb", "laplace", "laplace_fisher"),
+  dll = "EBSmoothr"
+)
 }
 \arguments{
 \item{LGP_setup}{A list returned by \code{\link{LGP_setup}}, containing
@@ -13,17 +18,33 @@ ebnm_LGP_generator(LGP_setup, link = c("identity", "log"), dll = "EBSmoothr")
 \item{link}{Either \code{"identity"} or \code{"log"}. This argument overrides
 \code{LGP_setup$link_id} if present.}
 
+\item{backend}{Backend choice. \code{"auto"} uses \code{"tmb"} for
+\code{link = "identity"} and \code{"laplace_fisher"} for
+\code{link = "log"}. \code{"laplace"} uses the R observed-Hessian
+Laplace backend. \code{"laplace_fisher"} is available only for
+\code{link = "log"}.}
+
 \item{dll}{Compiled TMB DLL name (default \code{"EBSmoothr"}).}
 }
 \value{
 A function that returns an object of class \code{"ebnm"} (and \code{"list"}).
-  The returned object includes posterior mean/variance, fitted hyperparameters,
-  and the log-likelihood diagnostics described above.
+The closure has signature
+\code{function(x, s, g_init = NULL, fix_g = FALSE, beta_fixed = NULL, beta_prec = NULL, fix_params = character(), output = NULL)}.
+The returned fit includes posterior mean/variance, fitted hyperparameters,
+fitted/fixed \code{beta}, the resolved \code{g_init}, and the log-likelihood
+diagnostics described above.
 }
 \description{
 Returns a function with signature
-\code{function(x, s, g_init = NULL, fix_g = FALSE, beta_fixed = NULL, output = NULL)}
-that fits an L-GP smoother using a unified TMB objective.
+\code{function(x, s, g_init = NULL, fix_g = FALSE, beta_fixed = NULL, beta_prec = NULL, fix_params = character(), output = NULL)}
+that fits an L-GP smoother.
+
+This is the recommended public interface when the observation standard
+errors \code{s} are known and you want an \code{ebnm}-compatible L-GP
+smoother, for example inside \code{flashier} or \code{ebmf}. If the
+standard errors are unknown and you want to learn one common noise SD
+instead, use \code{\link{eb_smoother}} with \code{family = "lgp"} and
+\code{s = NULL}.
 
 The fitted latent linear predictor is
 \deqn{\eta = B U + X \beta,}
@@ -34,10 +55,17 @@ on \code{U}.
 
 The argument \code{link} controls how posterior moments are reported:
 \itemize{
-  \item \code{"identity"}: posterior moments are for \eqn{\eta}.
-  \item \code{"log"}: posterior moments are for \eqn{\exp(\eta)} using
-    a log-normal moment transform.
+\item \code{"identity"}: posterior moments are for \eqn{\eta}.
+\item \code{"log"}: posterior moments are for \eqn{\exp(\eta)} using
+a log-normal moment transform.
 }
+
+For \code{link = "log"}, \code{backend = "auto"} uses
+\code{"laplace_fisher"}. This keeps the conditional mode equal to the mode
+of the original log posterior and replaces only the Laplace posterior
+precision/log-determinant observation curvature by the Fisher/Gauss-Newton
+curvature. Explicit \code{backend = "laplace"} retains observed-Hessian
+Laplace semantics.
 }
 \details{
 \strong{Link handling.}
@@ -45,40 +73,56 @@ The \code{link} argument here \emph{overrides} \code{LGP_setup$link_id} if prese
 This is intentional so the caller can reuse a setup object while changing the link.
 
 \strong{Step A / Step B estimation logic.}
-The behavior is controlled by \code{LGP_setup$betaprec}:
+The public \code{beta} semantics are:
 \itemize{
-  \item \code{betaprec < 0} (EB mode for \code{beta}):
-    \enumerate{
-      \item Step A: integrate out \code{U} (Laplace) and optimize \code{(theta, beta)}.
-      \item Step B: fix \code{(theta, beta)} at the Step A estimates and infer \code{U}.
-    }
-  \item \code{betaprec >= 0}:
-    \enumerate{
-      \item Step A: integrate out \code{U} and \code{beta} and optimize \code{theta}.
-      \item Step B: fix \code{theta} and infer \code{(U, beta)} jointly.
-    }
+\item \code{beta_fixed}: treat \code{beta} as known.
+\item \code{beta_prec = NULL}: estimate \code{beta} by empirical Bayes.
+\item \code{beta_prec = 0}: use a flat zero-mean Gaussian prior on \code{beta}.
+\item \code{beta_prec > 0}: use a proper zero-mean Gaussian prior on \code{beta}.
 }
 
-\strong{Fixed-hyperparameter mode.}
-If \code{fix_g = TRUE}, the smoothing parameter \code{theta} is fixed at
-\code{g_init$scale} and the global coefficients \code{beta} are fixed at
-\code{beta_fixed}. If \code{beta_fixed} is \code{NULL}, the fitter uses a
-zero vector of length \code{ncol(LGP_setup$X)}. In this mode, Step B only
-infers the local coefficients \code{U}; it never re-estimates \code{beta}.
+When \code{beta_prec} is not supplied, the fitter falls back to the legacy
+\code{LGP_setup$betaprec} field so older code continues to work.
+
+With these semantics, the internal Step A / Step B logic becomes:
+\itemize{
+\item empirical-Bayes \code{beta}:
+\enumerate{
+\item Step A: integrate out \code{U} (Laplace) and optimize \code{(theta, beta)}.
+\item Step B: fix \code{(theta, beta)} at the Step A estimates and infer \code{U}.
+}
+\item fixed / flat-prior / proper-prior \code{beta}:
+\enumerate{
+\item Step A: integrate out \code{U} and \code{beta} and optimize \code{theta}.
+\item Step B: fix \code{theta} and infer \code{(U, beta)} jointly.
+}
+}
+
+\strong{Initialization and fixed-beta handling.}
+\code{g_init$beta}, when supplied, is treated as an initialization value for
+the global coefficients and is stored in the returned fit state. It is not a
+prior mean. Supplying \code{beta_fixed} fixes \code{beta} at that value
+regardless of whether \code{fix_g} is \code{TRUE} or \code{FALSE}. When
+\code{fix_g = TRUE}, \code{theta} is held fixed at \code{g_init$scale}.
+The returned function also accepts \code{fix_params}. Allowed values are
+\code{"scale"} and \code{"beta"}. Fixed scale uses
+\code{g_init$scale}, fixed beta uses \code{beta_fixed} when supplied or
+otherwise \code{g_init$beta}, and \code{fix_g = TRUE} is retained as a
+shortcut for \code{fix_params = "scale"}.
 
 \strong{Log-likelihood outputs.}
 The returned object includes multiple log-likelihood-style quantities:
 \itemize{
-  \item \code{log_likelihood}: the primary value returned, intended to be
-    backward-compatible with \pkg{EBMFSmooth}. When Step A is run
-    (\code{fix_g = FALSE}), this equals the integrated (marginal) objective
-    from Step A, i.e. \code{-optA$value}.
-  \item \code{log_likelihood_stepA}: the Step A integrated log-likelihood
-    (same as \code{log_likelihood} when Step A is run).
-  \item \code{log_likelihood_stepB_joint}: the joint log density at the Step B
-    MAP estimate (no Laplace correction).
-  \item \code{log_likelihood_stepB_laplace}: Laplace approximation around the
-    Step B MAP. With consistent objectives, this matches \code{log_likelihood}
-    when Step A is run; it is mainly provided as a diagnostic.
+\item \code{log_likelihood}: the primary value returned, intended to be
+backward-compatible with \pkg{EBMFSmooth}. When Step A is run
+(\code{fix_g = FALSE}), this equals the integrated (marginal) objective
+from Step A, i.e. \code{-optA$value}.
+\item \code{log_likelihood_stepA}: the Step A integrated log-likelihood
+(same as \code{log_likelihood} when Step A is run).
+\item \code{log_likelihood_stepB_joint}: the joint log density at the Step B
+MAP estimate (no Laplace correction).
+\item \code{log_likelihood_stepB_laplace}: Laplace approximation around the
+Step B MAP. With consistent objectives, this matches \code{log_likelihood}
+when Step A is run; it is mainly provided as a diagnostic.
 }
 }

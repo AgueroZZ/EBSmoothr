@@ -4,13 +4,18 @@
 \alias{LGP}
 \title{Define the L-GP Object}
 \usage{
-LGP(scale)
+LGP(scale = 0, beta = NULL, beta_prec = NULL)
 }
 \arguments{
 \item{scale}{A numeric value representing the scale parameter of the L-GP.}
+
+\item{beta}{Optional intercept state stored with the L-GP object.}
+
+\item{beta_prec}{Optional non-negative prior precision stored with the L-GP
+object.}
 }
 \value{
-An object of class `"LGP"`, a data frame containing the scale parameter.
+An object of class \code{"LGP"}, a data frame containing the scale parameter.
 }
 \description{
 Creates an object from the one-parameter L-GP family.
