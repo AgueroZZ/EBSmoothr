@@ -312,13 +312,35 @@ test_that("Matern fix_params supports partial hyperparameter and beta fixing", {
   )
 })
 
-test_that("Matern learned-noise TMB path exposes configurable start count", {
+test_that("Matern TMB path respects configurable start count", {
   set.seed(105)
 
   loc <- seq(0, 1, length.out = 8)
+  s <- rep(0.04, length(loc))
   x <- exp(0.1 + 0.2 * sin(2 * pi * loc)) + rnorm(length(loc), sd = 0.04)
 
-  fit_one <- eb_smoother(
+  fit_known_one <- eb_smoother(
+    x,
+    s = s,
+    family = "matern",
+    locations = loc,
+    link = "log",
+    backend = "laplace"
+  )
+  expect_equal(fit_known_one$raw_fit$laplace_diagnostics$stepA_n_starts, 1)
+
+  fit_known_five <- eb_smoother(
+    x,
+    s = s,
+    family = "matern",
+    locations = loc,
+    link = "log",
+    backend = "laplace",
+    matern_n_starts = 5
+  )
+  expect_equal(fit_known_five$raw_fit$laplace_diagnostics$stepA_n_starts, 5)
+
+  fit_learned_one <- eb_smoother(
     x,
     s = NULL,
     family = "matern",
@@ -326,9 +348,9 @@ test_that("Matern learned-noise TMB path exposes configurable start count", {
     link = "log",
     backend = "laplace"
   )
-  expect_equal(fit_one$raw_fit$laplace_diagnostics$stepA_n_starts, 1)
+  expect_equal(fit_learned_one$raw_fit$laplace_diagnostics$stepA_n_starts, 1)
 
-  fit_five <- eb_smoother(
+  fit_learned_five <- eb_smoother(
     x,
     s = NULL,
     family = "matern",
@@ -337,7 +359,7 @@ test_that("Matern learned-noise TMB path exposes configurable start count", {
     backend = "laplace",
     matern_n_starts = 5
   )
-  expect_equal(fit_five$raw_fit$laplace_diagnostics$stepA_n_starts, 5)
+  expect_equal(fit_learned_five$raw_fit$laplace_diagnostics$stepA_n_starts, 5)
 })
 
 test_that("Matern backend aliases canonicalize to simpler public backends", {

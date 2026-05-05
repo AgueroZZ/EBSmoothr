@@ -6,7 +6,7 @@
 \usage{
 ebnm_LGP_generator(
   LGP_setup,
-  link = c("identity", "log"),
+  link = c("identity", "log", "softplus"),
   backend = c("auto", "tmb", "laplace", "laplace_fisher"),
   dll = "EBSmoothr"
 )
@@ -15,14 +15,16 @@ ebnm_LGP_generator(
 \item{LGP_setup}{A list returned by \code{\link{LGP_setup}}, containing
 \code{X}, \code{B}, \code{P}, \code{logPdet}, and \code{betaprec}.}
 
-\item{link}{Either \code{"identity"} or \code{"log"}. This argument overrides
+\item{link}{One of \code{"identity"}, \code{"log"}, or
+\code{"softplus"}. This argument overrides
 \code{LGP_setup$link_id} if present.}
 
 \item{backend}{Backend choice. \code{"auto"} uses \code{"tmb"} for
 \code{link = "identity"} and \code{"laplace_fisher"} for
-\code{link = "log"}. \code{"laplace"} uses the R observed-Hessian
-Laplace backend. \code{"laplace_fisher"} is available only for
-\code{link = "log"}.}
+\code{link = "log"}, and \code{"laplace"} for
+\code{link = "softplus"}. \code{"laplace"} uses the observed-Hessian
+Laplace backend. \code{"laplace_fisher"} is available for
+\code{link = "log"} and \code{link = "softplus"}.}
 
 \item{dll}{Compiled TMB DLL name (default \code{"EBSmoothr"}).}
 }
@@ -58,11 +60,17 @@ The argument \code{link} controls how posterior moments are reported:
 \item \code{"identity"}: posterior moments are for \eqn{\eta}.
 \item \code{"log"}: posterior moments are for \eqn{\exp(\eta)} using
 a log-normal moment transform.
+\item \code{"softplus"}: posterior moments are for
+\eqn{\log(1 + \exp(\eta))}. The package evaluates deterministic
+Gauss-Hermite quadrature under the marginal Gaussian Laplace
+approximation for each \eqn{\eta_i}, so reported moments match
+\code{posterior_sampler()} in expectation.
 }
 
 For \code{link = "log"}, \code{backend = "auto"} uses
-\code{"laplace_fisher"}. This keeps the conditional mode equal to the mode
-of the original log posterior and replaces only the Laplace posterior
+\code{"laplace_fisher"}. For \code{link = "softplus"}, it uses
+\code{"laplace"}. The Fisher backend keeps the conditional mode equal to the
+mode of the original log posterior and replaces only the Laplace posterior
 precision/log-determinant observation curvature by the Fisher/Gauss-Newton
 curvature. Explicit \code{backend = "laplace"} retains observed-Hessian
 Laplace semantics.

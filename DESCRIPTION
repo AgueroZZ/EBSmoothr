@@ -1,7 +1,7 @@
 Package: EBSmoothr
 Type: Package
 Title: Empirical Bayes Smoothing with L-GP and Matern Priors
-Version: 0.1.0
+Version: 0.2.1
 Authors@R: c(
     person(
       "EBSmoothr", "Developers",
@@ -16,10 +16,11 @@ Description: Provides empirical Bayes smoothers for Gaussian means using
     known-noise `ebnm` workflows through `ebnm_LGP_generator()` and
     `ebnm_Matern_generator()`, and a higher-level `eb_smoother()`
     interface that can also learn one common observation noise SD when
-    standard errors are unknown. Includes a constant Gaussian baseline,
-    point-mass reference families, spatial scoring wrappers, TMB backends
-    for L-GP and Matern Laplace models, and exact Gaussian / INLA-SPDE
-    backends for Matern models.
+    standard errors are unknown. Supports identity, log, and softplus
+    response links, constant Gaussian baselines, point-mass reference
+    families, spatial scoring wrappers, TMB backends for L-GP and Matern
+    Laplace models, and exact Gaussian / INLA-SPDE backends for Matern
+    models.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)

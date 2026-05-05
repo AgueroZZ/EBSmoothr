@@ -62,6 +62,44 @@ test_that("Matern auto backend uses Fisher Laplace for log-link fits", {
   expect_equal(fit_auto_fixed_g$laplace_curvature, "fisher")
 })
 
+test_that("Matern softplus auto backend uses observed Laplace; INLA unsupported", {
+  set.seed(211)
+  loc <- seq(0, 1, length.out = 12)
+  s <- rep(0.1, length(loc))
+  eta <- seq(-6, 6, length.out = length(loc))
+  x <- log1p(exp(eta)) + rnorm(length(loc), sd = s)
+
+  fit_auto <- ebnm_Matern_generator(locations = loc, link = "softplus")(x, s)
+  fit_fisher <- ebnm_Matern_generator(locations = loc, link = "softplus", backend = "laplace_fisher")(x, s)
+  expect_equal(fit_auto$backend, "laplace")
+  expect_equal(fit_auto$laplace_curvature, "observed")
+  expect_equal(fit_fisher$backend, "laplace_fisher")
+  expect_equal(fit_fisher$laplace_curvature, "fisher")
+  expect_error(
+    ebnm_Matern_generator(locations = loc, link = "softplus", backend = "inla")(x, s),
+    "not currently supported by the INLA Matern backend"
+  )
+})
+
+test_that("Matern softplus posterior moments match empirical moments from posterior draws", {
+  set.seed(212)
+  loc <- seq(0, 1, length.out = 16)
+  s <- rep(0.08, length(loc))
+  eta <- -0.4 + 1.2 * sin(2 * pi * loc)
+  x <- log1p(exp(eta)) + rnorm(length(loc), sd = s)
+
+  fit <- ebnm_Matern_generator(locations = loc, link = "softplus", backend = "laplace")(x, s)
+  nsamp <- 12000
+  draws <- fit$posterior_sampler(nsamp)
+  draw_mean <- colMeans(draws)
+  draw_var <- apply(draws, 2, var)
+
+  mean_tol <- 5 * max(apply(draws, 2, stats::sd) / sqrt(nsamp)) + 1e-4
+  var_tol <- 8 * max(sqrt(2 / (nsamp - 1)) * pmax(draw_var, fit$posterior$var)) + 1e-4
+  expect_lt(max(abs(draw_mean - fit$posterior$mean)), mean_tol)
+  expect_lt(max(abs(draw_var - fit$posterior$var)), var_tol)
+})
+
 test_that("Matern log-link manual and INLA backends agree", {
   set.seed(12)
 
@@ -291,6 +329,62 @@ test_that("Matern TMB Laplace validation catches unusable fits", {
   skipped_stepB <- valid_fit
   skipped_stepB$laplace_diagnostics$stepB_joint_nll <- NA_real_
   expect_null(EBSmoothr:::.matern_laplace_tmb_invalid_reason(skipped_stepB))
+})
+
+test_that("Public Matern Laplace backends do not fall back to R reference", {
+  loc <- seq(0, 1, length.out = 6)
+  s <- rep(0.1, length(loc))
+  x <- exp(0.1 + 0.2 * sin(2 * pi * loc))
+
+  expect_error(
+    ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace", alpha = 1)(x, s),
+    "require a successful TMB fit"
+  )
+  expect_error(
+    ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace_fisher", alpha = 1)(x, s),
+    "require a successful TMB fit"
+  )
+
+  fit_r <- ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace_r", alpha = 1)(x, s)
+  expect_equal(fit_r$laplace_implementation, "r")
+})
+
+test_that("Selected-inverse variance helper matches solve reference", {
+  old_options <- options(EBSmoothr.qinv_min_n = 1, EBSmoothr.qinv_max_row_nnz = 8)
+  on.exit(options(old_options), add = TRUE)
+
+  Q <- Matrix::bandSparse(
+    8,
+    k = c(-1, 0, 1),
+    diagonals = list(rep(-0.1, 7), rep(2, 8), rep(-0.1, 7))
+  )
+  Q_dense_inv <- solve(as.matrix(Q))
+
+  A_diag <- Matrix::Diagonal(8)
+  diag_var <- EBSmoothr:::.compute_diag_A_Qinv_At(A_diag, Q)
+  expect_equal(diag_var, diag(Q_dense_inv), tolerance = 1e-10)
+
+  A_covered <- Matrix::sparseMatrix(
+    i = c(1, 1, 2, 2, 3, 3),
+    j = c(1, 2, 2, 3, 5, 6),
+    x = 1,
+    dims = c(3, 8)
+  )
+  qinv <- INLA::inla.qinv(Q)
+  expect_true(EBSmoothr:::.qinv_pattern_covers(A_covered, qinv))
+  covered_var <- EBSmoothr:::.compute_diag_A_Qinv_At(A_covered, Q)
+  covered_ref <- diag(as.matrix(A_covered) %*% Q_dense_inv %*% t(as.matrix(A_covered)))
+  expect_equal(covered_var, covered_ref, tolerance = 1e-10)
+
+  Q_diag <- Matrix::Diagonal(8, x = 2)
+  A_uncovered <- Matrix::sparseMatrix(i = c(1, 1), j = c(1, 3), x = 1, dims = c(1, 8))
+  expect_false(EBSmoothr:::.qinv_pattern_covers(A_uncovered, INLA::inla.qinv(Q_diag)))
+  uncovered_var <- EBSmoothr:::.compute_diag_A_Qinv_At(A_uncovered, Q_diag)
+  uncovered_ref <- diag(as.matrix(A_uncovered) %*% solve(as.matrix(Q_diag)) %*% t(as.matrix(A_uncovered)))
+  expect_equal(uncovered_var, uncovered_ref, tolerance = 1e-10)
+
+  options(EBSmoothr.qinv_max_row_nnz = 1)
+  expect_false(EBSmoothr:::.qinv_pattern_covers(A_covered, qinv))
 })
 
 test_that("Matern wrapper supports known and learned-noise log links", {

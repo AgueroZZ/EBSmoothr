@@ -50,8 +50,8 @@ comparison or a permutation p-value for the spatial score.
 \details{
 With \code{method = "score"}, the function calls \code{\link[=spatial_scores]{spatial_scores()}} and selects
 the spatial model when \code{spatial_score - reference_score > tol}. It selects
-the nonspatial/reference route when the difference is below \code{-tol};
-otherwise the row is marked as a tie.
+the reference route when the difference is below \code{-tol}; otherwise the row is
+marked as a tie.
 
 With \code{method = "permutation"}, the function calls
 \code{\link[=spatial_scores_permutation]{spatial_scores_permutation()}} and selects the spatial model when the

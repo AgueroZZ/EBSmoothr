@@ -28,7 +28,8 @@ This value is retained for backward compatibility. New code should prefer
 the public \code{beta_prec} argument on \code{\link{ebnm_LGP_generator}}
 and \code{\link{eb_smoother}}.}
 
-\item{link}{Either \code{"identity"} or \code{"log"}. This value is stored
+\item{link}{One of \code{"identity"}, \code{"log"}, or
+\code{"softplus"}. This value is stored
 as \code{link_id} in the returned object for convenience; the final
 link used by the fitter is determined by the \code{link} argument in
 \code{\link{ebnm_LGP_generator}}.}
@@ -39,7 +40,8 @@ and additional scalars used by the TMB objective:
 \itemize{
 \item \code{logPdet}: \eqn{\log|P|} for the penalty/precision component.
 \item \code{betaprec}: the value supplied via \code{betaprec}.
-\item \code{link_id}: integer encoding of the requested link (\code{0} identity, \code{1} log).
+\item \code{link_id}: integer encoding of the requested link
+(\code{0} identity, \code{1} log, \code{2} softplus).
 \item \code{model_id}: internal TMB objective selector; \code{0} for L-GP.
 }
 }

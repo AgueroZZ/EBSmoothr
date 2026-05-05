@@ -114,7 +114,7 @@ test_that("spatial_select works in score and permutation modes", {
   )
   expect_s3_class(score_selection, "spatial_select")
   expect_equal(nrow(score_selection$selection_summary), 2L)
-  expect_true(all(score_selection$selection_summary$selection %in% c("spatial", "nonspatial", "tie", NA)))
+  expect_true(all(score_selection$selection_summary$selection %in% c("spatial", "reference", "tie", NA)))
   expect_true(all(c("selection", "selected_family", "route_label") %in% names(score_selection$selection_summary)))
 
   permutation_selection <- spatial_select(

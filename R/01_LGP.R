@@ -29,9 +29,90 @@
   Matrix::solve(factor$chol, rhs, system = "A")
 }
 
+.qinv_min_n <- function() {
+  min_n <- getOption("EBSmoothr.qinv_min_n", 2000L)
+  if (!is.numeric(min_n) || length(min_n) != 1L || is.na(min_n) || min_n < 1) {
+    return(2000L)
+  }
+  as.integer(ceiling(min_n))
+}
+
+.qinv_max_row_nnz <- function() {
+  max_nnz <- getOption("EBSmoothr.qinv_max_row_nnz", 50L)
+  if (!is.numeric(max_nnz) || length(max_nnz) != 1L || is.na(max_nnz) || max_nnz < 1) {
+    return(50L)
+  }
+  as.integer(floor(max_nnz))
+}
+
+.matrix_pattern_keys <- function(M) {
+  M <- Matrix::drop0(Matrix::Matrix(M, sparse = TRUE))
+  M <- as(M, "TsparseMatrix")
+  i <- M@i + 1
+  j <- M@j + 1
+  n <- nrow(M)
+  unique(pmin(i, j) + (pmax(i, j) - 1) * n)
+}
+
+.A_required_qinv_pattern_keys <- function(A, max_row_nnz = .qinv_max_row_nnz()) {
+  A <- Matrix::drop0(Matrix::Matrix(A, sparse = TRUE))
+  A <- as(A, "TsparseMatrix")
+  rows <- A@i + 1
+  cols <- A@j + 1
+  if (!length(cols)) {
+    return(numeric())
+  }
+
+  row_nnz <- tabulate(rows, nbins = nrow(A))
+  if (any(row_nnz > max_row_nnz)) {
+    return(NULL)
+  }
+
+  n <- ncol(A)
+  by_row <- split(cols, rows)
+  keys <- unlist(lapply(by_row, function(idx) {
+    idx <- unique(idx)
+    if (length(idx) == 1L) {
+      return(idx + (idx - 1) * n)
+    }
+    grid <- expand.grid(idx, idx)
+    pmin(grid[[1]], grid[[2]]) + (pmax(grid[[1]], grid[[2]]) - 1) * n
+  }), use.names = FALSE)
+  unique(keys)
+}
+
+.qinv_pattern_covers <- function(A, qinv) {
+  required <- .A_required_qinv_pattern_keys(A)
+  if (is.null(required)) {
+    return(FALSE)
+  }
+  if (!length(required)) {
+    return(TRUE)
+  }
+  available <- .matrix_pattern_keys(qinv)
+  all(required %in% available)
+}
+
 .compute_diag_A_Qinv_At <- function(A, Q) {
   factor <- .factorize_spd(Q)
   A <- Matrix::Matrix(A, sparse = TRUE)
+
+  use_selected_inverse <- ncol(A) >= .qinv_min_n() && requireNamespace("INLA", quietly = TRUE)
+  if (isTRUE(use_selected_inverse)) {
+    qinv <- tryCatch(INLA::inla.qinv(factor$matrix), error = function(e) NULL)
+    if (!is.null(qinv)) {
+      qinv <- Matrix::Matrix(qinv, sparse = TRUE)
+      if (inherits(A, "diagonalMatrix")) {
+        diag_A <- as.numeric(Matrix::diag(A))
+        return(diag_A^2 * as.numeric(Matrix::diag(qinv)))
+      }
+      if (.qinv_pattern_covers(A, qinv)) {
+        V <- qinv %*% Matrix::t(A)
+        return(as.numeric(Matrix::rowSums(A * Matrix::t(V))))
+      }
+    }
+  }
+
   V <- .solve_spd_factor(factor, Matrix::t(A))
   as.numeric(Matrix::rowSums(A * Matrix::t(V)))
 }
@@ -172,7 +253,8 @@ LGP <- function(scale = 0, beta = NULL, beta_prec = NULL) {
 #'   This value is retained for backward compatibility. New code should prefer
 #'   the public \code{beta_prec} argument on \code{\link{ebnm_LGP_generator}}
 #'   and \code{\link{eb_smoother}}.
-#' @param link Either \code{"identity"} or \code{"log"}. This value is stored
+#' @param link One of \code{"identity"}, \code{"log"}, or
+#'   \code{"softplus"}. This value is stored
 #'   as \code{link_id} in the returned object for convenience; the final
 #'   link used by the fitter is determined by the \code{link} argument in
 #'   \code{\link{ebnm_LGP_generator}}.
@@ -182,12 +264,14 @@ LGP <- function(scale = 0, beta = NULL, beta_prec = NULL) {
 #'   \itemize{
 #'     \item \code{logPdet}: \eqn{\log|P|} for the penalty/precision component.
 #'     \item \code{betaprec}: the value supplied via \code{betaprec}.
-#'     \item \code{link_id}: integer encoding of the requested link (\code{0} identity, \code{1} log).
+#'     \item \code{link_id}: integer encoding of the requested link
+#'       (\code{0} identity, \code{1} log, \code{2} softplus).
 #'     \item \code{model_id}: internal TMB objective selector; \code{0} for L-GP.
 #'   }
 #'
 #' @export
 LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity") {
+  link <- match.arg(link, choices = c("identity", "log", "softplus"))
   if (!is.numeric(betaprec) || length(betaprec) != 1) stop("betaprec must be a single numeric.")
   t <- as.numeric(t); if (anyNA(t)) stop("t contains NA.")
 
@@ -202,7 +286,7 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
     P = as(Matrix::Matrix(P, sparse = TRUE), "TsparseMatrix"),
     logPdet = sum(log(diff(knots))),  # OK for your diag(diff(knots)) P
     betaprec = as.numeric(betaprec),
-    link_id = ifelse(link == "log", 1L, 0L),
+    link_id = if (identical(link, "identity")) 0L else if (identical(link, "log")) 1L else 2L,
     model_id = 0L
   )
   tmbdat
@@ -211,7 +295,7 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
 .lgp_observation_terms <- function(eta,
                                    x,
                                    s,
-                                   link = c("identity", "log"),
+                                   link = c("identity", "log", "softplus"),
                                    laplace_curvature = c("observed", "fisher")) {
   link <- match.arg(link)
   laplace_curvature <- match.arg(laplace_curvature)
@@ -222,7 +306,7 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
     mu <- eta
     grad <- (mu - x) / (s^2)
     hess_diag <- 1 / (s^2)
-  } else {
+  } else if (identical(link, "log")) {
     if (any(eta > 40)) {
       stop("The log-link linear predictor overflowed during L-GP optimization.")
     }
@@ -233,6 +317,16 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
     } else {
       mu * (2 * mu - x) / (s^2)
     }
+  } else {
+    softplus <- .softplus_stable(eta)
+    sigmoid <- .sigmoid_stable(eta)
+    mu <- softplus
+    grad <- ((mu - x) / (s^2)) * sigmoid
+    hess_diag <- if (identical(laplace_curvature, "fisher")) {
+      (sigmoid^2) / (s^2)
+    } else {
+      ((sigmoid^2) + (mu - x) * sigmoid * (1 - sigmoid)) / (s^2)
+    }
   }
   resid <- x - mu
   nll <- 0.5 * sum((resid / s)^2 + log(2 * pi * s^2))
@@ -242,15 +336,21 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
   list(nll = as.numeric(nll), grad = as.numeric(grad), hess_diag = as.numeric(hess_diag), mu = mu)
 }
 
-.lgp_response_moments_from_eta <- function(eta_mean, eta_var, link = c("identity", "log")) {
+.lgp_response_moments_from_eta <- function(eta_mean, eta_var, link = c("identity", "log", "softplus")) {
   link <- match.arg(link)
   eta_mean <- as.numeric(eta_mean)
   eta_var <- pmax(as.numeric(eta_var), 0)
   if (identical(link, "identity")) {
     return(list(mean = eta_mean, var = eta_var))
   }
-  mean <- exp(eta_mean + 0.5 * eta_var)
-  var <- exp(2 * eta_mean + eta_var) * (exp(eta_var) - 1)
+  if (identical(link, "log")) {
+    mean <- exp(eta_mean + 0.5 * eta_var)
+    var <- exp(2 * eta_mean + eta_var) * (exp(eta_var) - 1)
+  } else {
+    moments <- .softplus_gaussian_moments(eta_mean, eta_var)
+    mean <- moments$mean
+    var <- moments$var
+  }
   list(mean = as.numeric(mean), var = as.numeric(var))
 }
 
@@ -287,7 +387,7 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
                                          beta_prec = NULL,
                                          beta_init = NULL,
                                          initial_mode = NULL,
-                                         link = c("identity", "log"),
+                                         link = c("identity", "log", "softplus"),
                                          laplace_curvature = c("observed", "fisher")) {
   link <- match.arg(link)
   laplace_curvature <- match.arg(laplace_curvature)
@@ -442,7 +542,7 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
                                beta_prec = NULL,
                                beta_prec_missing = FALSE,
                                fix_params = character(),
-                               link = c("identity", "log"),
+                               link = c("identity", "log", "softplus"),
                                learn_noise = FALSE,
                                laplace_curvature = c("observed", "fisher")) {
   link <- match.arg(link)
@@ -560,7 +660,7 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
     if (!isTRUE(objective$integrated_beta)) {
       eta_s <- eta_s + as.numeric(X %*% beta_hat)
     }
-    if (identical(link, "identity")) t(eta_s) else t(exp(eta_s))
+    if (identical(link, "identity")) t(eta_s) else if (identical(link, "log")) t(exp(eta_s)) else t(.softplus_stable(eta_s))
   }
   fitted_g <- LGP(
     scale = objective$theta,
@@ -619,11 +719,17 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
 #'   \item \code{"identity"}: posterior moments are for \eqn{\eta}.
 #'   \item \code{"log"}: posterior moments are for \eqn{\exp(\eta)} using
 #'     a log-normal moment transform.
+#'   \item \code{"softplus"}: posterior moments are for
+#'     \eqn{\log(1 + \exp(\eta))}. The package evaluates deterministic
+#'     Gauss-Hermite quadrature under the marginal Gaussian Laplace
+#'     approximation for each \eqn{\eta_i}, so reported moments match
+#'     \code{posterior_sampler()} in expectation.
 #' }
 #'
 #' For \code{link = "log"}, \code{backend = "auto"} uses
-#' \code{"laplace_fisher"}. This keeps the conditional mode equal to the mode
-#' of the original log posterior and replaces only the Laplace posterior
+#' \code{"laplace_fisher"}. For \code{link = "softplus"}, it uses
+#' \code{"laplace"}. The Fisher backend keeps the conditional mode equal to the
+#' mode of the original log posterior and replaces only the Laplace posterior
 #' precision/log-determinant observation curvature by the Fisher/Gauss-Newton
 #' curvature. Explicit \code{backend = "laplace"} retains observed-Hessian
 #' Laplace semantics.
@@ -689,13 +795,15 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
 #'
 #' @param LGP_setup A list returned by \code{\link{LGP_setup}}, containing
 #'   \code{X}, \code{B}, \code{P}, \code{logPdet}, and \code{betaprec}.
-#' @param link Either \code{"identity"} or \code{"log"}. This argument overrides
+#' @param link One of \code{"identity"}, \code{"log"}, or
+#'   \code{"softplus"}. This argument overrides
 #'   \code{LGP_setup$link_id} if present.
 #' @param backend Backend choice. \code{"auto"} uses \code{"tmb"} for
 #'   \code{link = "identity"} and \code{"laplace_fisher"} for
-#'   \code{link = "log"}. \code{"laplace"} uses the R observed-Hessian
-#'   Laplace backend. \code{"laplace_fisher"} is available only for
-#'   \code{link = "log"}.
+#'   \code{link = "log"}, and \code{"laplace"} for
+#'   \code{link = "softplus"}. \code{"laplace"} uses the observed-Hessian
+#'   Laplace backend. \code{"laplace_fisher"} is available for
+#'   \code{link = "log"} and \code{link = "softplus"}.
 #' @param dll Compiled TMB DLL name (default \code{"EBSmoothr"}).
 #'
 #' @return A function that returns an object of class \code{"ebnm"} (and \code{"list"}).
@@ -707,18 +815,18 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
 #'
 #' @export
 ebnm_LGP_generator <- function(LGP_setup,
-                               link = c("identity", "log"),
+                               link = c("identity", "log", "softplus"),
                                backend = c("auto", "tmb", "laplace", "laplace_fisher"),
                                dll = "EBSmoothr") {
   link <- match.arg(link)
   backend <- match.arg(backend)
   backend_use <- if (identical(backend, "auto")) {
-    if (identical(link, "log")) "laplace_fisher" else "tmb"
+    if (identical(link, "log")) "laplace_fisher" else if (identical(link, "softplus")) "laplace" else "tmb"
   } else {
     backend
   }
-  if (identical(backend_use, "laplace_fisher") && !identical(link, "log")) {
-    stop("`backend = \"laplace_fisher\"` is only available for `link = \"log\"`.")
+  if (identical(backend_use, "laplace_fisher") && !(identical(link, "log") || identical(link, "softplus"))) {
+    stop("`backend = \"laplace_fisher\"` is only available for `link = \"log\"` or `link = \"softplus\"`.")
   }
 
   .check_numeric_scalar <- function(z, nm) {
@@ -729,7 +837,7 @@ ebnm_LGP_generator <- function(LGP_setup,
   }
 
   # Force link_id from the function argument (override setup$link_id if present)
-  link_id_arg <- if (link == "log") 1L else 0L
+  link_id_arg <- if (identical(link, "identity")) 0L else if (identical(link, "log")) 1L else 2L
   if (!is.null(LGP_setup$link_id) && as.integer(LGP_setup$link_id) != link_id_arg) {
     warning("`link` overrides `LGP_setup$link_id` (they differ). Using link = '", link, "'.")
   }
@@ -1004,13 +1112,9 @@ ebnm_LGP_generator <- function(LGP_setup,
       free_dim <- pB + pX
     }
 
-    if (tmbdat$link_id == 0L) {
-      post_mean <- eta_mean
-      post_var <- eta_var
-    } else {
-      post_mean <- exp(eta_mean + 0.5 * eta_var)
-      post_var <- exp(2 * eta_mean + eta_var) * (exp(eta_var) - 1)
-    }
+    response_moments <- .lgp_response_moments_from_eta(eta_mean, eta_var, link = link)
+    post_mean <- response_moments$mean
+    post_var <- response_moments$var
 
     posterior <- data.frame(mean = as.numeric(post_mean), var = as.numeric(post_var))
     posterior$second_moment <- posterior$mean^2 + posterior$var
@@ -1034,7 +1138,7 @@ ebnm_LGP_generator <- function(LGP_setup,
         A <- .build_A_in_par_order(tmbdat$B, tmbdat$X, par_names)
         eta_s <- as.matrix(A) %*% t(samps)
       }
-      if (tmbdat$link_id == 0L) t(eta_s) else t(exp(eta_s))
+      if (tmbdat$link_id == 0L) t(eta_s) else if (tmbdat$link_id == 1L) t(exp(eta_s)) else t(.softplus_stable(eta_s))
     }
 
     fitted_g <- LGP(

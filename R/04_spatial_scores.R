@@ -283,6 +283,7 @@
     point_reference_mass = if (!is.na(point_family)) .spatial_fit_point_mass(reference_fit) else NA_real_,
     point_reference_scale = if (!is.na(point_family)) .spatial_fit_point_scale(reference_fit) else NA_real_,
     loglik_matern = if (identical(spatial_spec$family, "matern")) spatial_score else NA_real_,
+    loglik_reference = reference_score,
     loglik_nonspatial = reference_score,
     loglik_point_exponential = if (identical(reference_family, "point_exponential")) reference_score else NA_real_,
     matern_backend_requested = .spatial_null_coalesce(spatial_spec$backend, "auto"),
@@ -306,10 +307,10 @@
   selection <- ifelse(
     out$status != "ok" | !is.finite(delta),
     NA_character_,
-    ifelse(delta > tol, "spatial", ifelse(delta < -tol, "nonspatial", "tie"))
+    ifelse(delta > tol, "spatial", ifelse(delta < -tol, "reference", "tie"))
   )
-  route_label <- ifelse(selection == "spatial", "spatial", "nonspatial")
-  route_label[is.na(selection)] <- "nonspatial"
+  route_label <- ifelse(selection == "spatial", "spatial", "reference")
+  route_label[is.na(selection)] <- "reference"
   selected_family <- ifelse(selection == "spatial", out$spatial_family, out$reference_family)
   tie_idx <- !is.na(selection) & selection == "tie"
   selected_family[tie_idx] <- "tie"
@@ -381,8 +382,9 @@
 #'   \item{fits}{When `keep_fits = TRUE`, a list with `spatial` and
 #'   `reference` fit lists.}
 #'   \item{screening_summary}{Alias of `scores` for simulation workflows.}
-#'   \item{matern_fits,nonspatial_fits}{Compatibility aliases for spatial and
-#'   reference fits when `keep_fits = TRUE`.}
+#'   \item{matern_fits,reference_fits}{Compatibility aliases for spatial and
+#'   reference fits when `keep_fits = TRUE`. `nonspatial_fits` is also retained
+#'   as a compatibility alias for older scripts.}
 #' }
 #'
 #' @examples
@@ -469,6 +471,7 @@ spatial_scores <- function(object,
     if (!is.null(reference_fits)) names(reference_fits) <- component_info$label
     out$fits <- list(spatial = spatial_fits, reference = reference_fits)
     out$matern_fits <- spatial_fits
+    out$reference_fits <- reference_fits
     out$nonspatial_fits <- reference_fits
     if (!is.null(reference_spec) && identical(reference_spec$family, "point_exponential")) {
       out$point_exponential_fits <- reference_fits
@@ -487,8 +490,8 @@ spatial_scores <- function(object,
 #' @details
 #' With `method = "score"`, the function calls [spatial_scores()] and selects
 #' the spatial model when `spatial_score - reference_score > tol`. It selects
-#' the nonspatial/reference route when the difference is below `-tol`;
-#' otherwise the row is marked as a tie.
+#' the reference route when the difference is below `-tol`; otherwise the row is
+#' marked as a tie.
 #'
 #' With `method = "permutation"`, the function calls
 #' [spatial_scores_permutation()] and selects the spatial model when the
@@ -577,7 +580,7 @@ spatial_select <- function(object,
         tol = tol,
         scores = scores
       ),
-      scores[intersect(names(scores), c("fits", "matern_fits", "nonspatial_fits", "point_exponential_fits"))]
+      scores[intersect(names(scores), c("fits", "matern_fits", "reference_fits", "nonspatial_fits", "point_exponential_fits"))]
     )
     class(out) <- c("spatial_select", "list")
     return(out)
@@ -593,11 +596,11 @@ spatial_select <- function(object,
   selection <- ifelse(
     summary$status != "ok" | !is.finite(summary$p_value),
     NA_character_,
-    ifelse(summary$p_value <= alpha, "spatial", "nonspatial")
+    ifelse(summary$p_value <= alpha, "spatial", "reference")
   )
   summary$selection <- selection
-  summary$route_label <- ifelse(!is.na(selection) & selection == "spatial", "spatial", "nonspatial")
-  summary$route_label[is.na(selection)] <- "nonspatial"
+  summary$route_label <- ifelse(!is.na(selection) & selection == "spatial", "spatial", "reference")
+  summary$route_label[is.na(selection)] <- "reference"
   summary$reference_family <- reference_spec$family
   summary$selected_family <- ifelse(!is.na(selection) & selection == "spatial", summary$spatial_family, reference_spec$family)
   summary$selection_method <- "permutation"

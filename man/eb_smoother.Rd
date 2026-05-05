@@ -9,7 +9,7 @@ eb_smoother(
   s = NULL,
   family = c("matern", "constant", "point_exponential", "point_normal", "point_laplace",
     "lgp"),
-  backend = c("auto", "exact", "laplace", "laplace_fisher", "laplace_r", "inla"),
+  backend = c("auto", "exact", "laplace", "laplace_fisher", "inla"),
   locations = NULL,
   setup = NULL,
   g_init = NULL,
@@ -27,7 +27,7 @@ eb_smoother(
   profile_s_tol = .Machine$double.eps^0.25,
   suppress_warnings = TRUE,
   compute_exact_diagnostic = FALSE,
-  link = c("identity", "log"),
+  link = c("identity", "log", "softplus"),
   ...
 )
 }
@@ -42,13 +42,16 @@ vector for known noise, or \code{NULL} to learn one common scalar SD.}
 
 \item{backend}{Backend choice. For \code{family = "matern"}, \code{"auto"} uses the
 exact Gaussian backend for \code{link = "identity"} and \code{"laplace_fisher"} for
-\code{link = "log"}. Matern also supports explicit \code{"laplace"},
-\code{"laplace_fisher"}, \code{"laplace_r"}, and \code{"inla"}. Compatibility aliases
-\code{"laplace_tmb"} and \code{"inla_pc"} are still accepted. Explicit
-\code{"laplace"}, \code{"laplace_r"}, \code{"laplace_tmb"}, and \code{"inla"} retain
-observed-Hessian Laplace semantics for log-link fits. For
-\code{family = "lgp"}, \code{"auto"} uses \code{"tmb"} for the identity link and
-\code{"laplace_fisher"} for the log link. The \code{"constant"} and point-mass
+\code{link = "log"}, and \code{"laplace"} for \code{link = "softplus"}. Matern also
+supports explicit \code{"laplace"}, \code{"laplace_fisher"}, and \code{"inla"}.
+Compatibility aliases \code{"laplace_tmb"} and \code{"inla_pc"} are still accepted.
+Explicit \code{"laplace"}, \code{"laplace_tmb"}, and \code{"inla"} retain
+observed-Hessian Laplace semantics for log-link and softplus-link fits
+where supported. Public Matern Laplace backends use the package-owned TMB
+implementation or error; the R reference backend \code{"laplace_r"} is retained
+for internal validation only. For \code{family = "lgp"}, \code{"auto"} uses
+\code{"tmb"} for the identity link, \code{"laplace_fisher"} for the log link, and
+\code{"laplace"} for the softplus link. The \code{"constant"} and point-mass
 reference families support only the exact backend.}
 
 \item{locations}{Optional raw spatial locations for the Matern family.}
@@ -114,9 +117,11 @@ point-mass-reference noise SD.}
 log-likelihood evaluated at the Matern INLA mode.}
 
 \item{link}{Link used by the selected family. The Matern family supports
-\code{"identity"} and \code{"log"} fits with known or learned noise. The constant
-family supports \code{"identity"} and \code{"log"} constant-baseline fits. The L-GP
-family supports \code{"identity"} and \code{"log"}.}
+\code{"identity"}, \code{"log"}, and \code{"softplus"} fits with known or learned noise.
+The constant family supports \code{"identity"} and \code{"log"} constant-baseline
+fits. The L-GP family supports \code{"identity"}, \code{"log"}, and \code{"softplus"}.
+Softplus posterior moments are deterministic Gauss-Hermite transforms of
+each marginal Gaussian Laplace posterior for the linear predictor.}
 
 \item{...}{Additional arguments. \code{dll} is used for the learned-noise L-GP TMB
 path. \code{mode}, \code{scale}, \code{output}, \code{optmethod}, and \code{control} are forwarded
@@ -150,7 +155,7 @@ mathematically equivalent to joint optimization. Supplying \code{beta_fixed}
 instead holds the intercept fixed, while \code{beta_prec} can be used to switch
 to a flat (\code{0}) or proper (\verb{>0}) Gaussian prior on the intercept. These beta
 semantics are on the linear-predictor scale for every link, including
-\code{link = "log"}.
+\code{link = "log"} and \code{link = "softplus"}.
 }
 \examples{
 loc <- seq(0, 1, length.out = 40)

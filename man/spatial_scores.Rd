@@ -47,8 +47,9 @@ point-reference summaries when applicable.}
 \item{fits}{When \code{keep_fits = TRUE}, a list with \code{spatial} and
 \code{reference} fit lists.}
 \item{screening_summary}{Alias of \code{scores} for simulation workflows.}
-\item{matern_fits,nonspatial_fits}{Compatibility aliases for spatial and
-reference fits when \code{keep_fits = TRUE}.}
+\item{matern_fits,reference_fits}{Compatibility aliases for spatial and
+reference fits when \code{keep_fits = TRUE}. \code{nonspatial_fits} is also retained
+as a compatibility alias for older scripts.}
 }
 }
 \description{

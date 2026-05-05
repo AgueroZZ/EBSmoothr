@@ -94,6 +94,9 @@
   if (identical(link, "log")) {
     return("laplace_fisher")
   }
+  if (identical(link, "softplus")) {
+    return("laplace")
+  }
 
   "laplace"
 }
@@ -116,10 +119,10 @@
     ))
   }
   backend <- .matern_canonical_backend(backend, pc_penalty = pc_penalty)
-  if (identical(backend, "laplace_fisher") && !identical(link, "log")) {
-    stop("`backend = \"laplace_fisher\"` is only available for `link = \"log\"`.")
+  if (identical(backend, "laplace_fisher") && !(identical(link, "log") || identical(link, "softplus"))) {
+    stop("`backend = \"laplace_fisher\"` is only available for `link = \"log\"` or `link = \"softplus\"`.")
   }
-  if (identical(backend, "exact") && identical(link, "log")) {
+  if (identical(backend, "exact") && (identical(link, "log") || identical(link, "softplus"))) {
     return("laplace")
   }
   backend
@@ -884,7 +887,7 @@
                                       s = NULL,
                                       g_init = NULL,
                                       beta_fixed = NULL,
-                                      link = c("identity", "log")) {
+                                      link = c("identity", "log", "softplus")) {
   link <- match.arg(link)
   if (!is.null(beta_fixed)) {
     return(.check_single_numeric(beta_fixed, "beta_fixed"))
@@ -918,7 +921,7 @@
                                    penalty_range0,
                                    pc.penalty = NULL,
                                    allow_noise = FALSE,
-                                   link = c("identity", "log")) {
+                                   link = c("identity", "log", "softplus")) {
   link <- match.arg(link)
   beta_init <- .resolve_matern_beta_init(
     x = x,
@@ -1369,7 +1372,7 @@ matern_objective_breakdown <- function(fit,
                                    theta_init,
                                    beta_prec = 0,
                                    pc_penalty,
-                                   link = c("identity", "log"),
+                                   link = c("identity", "log", "softplus"),
                                    suppress_warnings = TRUE) {
   link <- match.arg(link)
   .with_quiet_inla_defaults({
@@ -1448,7 +1451,7 @@ matern_objective_breakdown <- function(fit,
                                               theta_init,
                                               beta_fixed,
                                               pc_penalty,
-                                              link = c("identity", "log"),
+                                              link = c("identity", "log", "softplus"),
                                               suppress_warnings = TRUE) {
   link <- match.arg(link)
   .with_quiet_inla_defaults({
@@ -1524,7 +1527,7 @@ matern_objective_breakdown <- function(fit,
                                                  noise_sd_init,
                                                  beta_prec = 0,
                                                  pc_penalty,
-                                                 link = c("identity", "log"),
+                                                 link = c("identity", "log", "softplus"),
                                                  suppress_warnings = TRUE) {
   link <- match.arg(link)
   .with_quiet_inla_defaults({
@@ -1612,7 +1615,7 @@ matern_objective_breakdown <- function(fit,
                                                             noise_sd_init,
                                                             beta_fixed,
                                                             pc_penalty,
-                                                            link = c("identity", "log"),
+                                                            link = c("identity", "log", "softplus"),
                                                             suppress_warnings = TRUE) {
   link <- match.arg(link)
   .with_quiet_inla_defaults({
@@ -1776,7 +1779,7 @@ matern_objective_breakdown <- function(fit,
                                                 theta_init,
                                                 beta_init,
                                                 pc_penalty,
-                                                link = c("identity", "log"),
+                                                link = c("identity", "log", "softplus"),
                                                 suppress_warnings = TRUE) {
   link <- match.arg(link)
 
@@ -1853,7 +1856,7 @@ matern_objective_breakdown <- function(fit,
                                                               noise_sd_init,
                                                               beta_init,
                                                               pc_penalty,
-                                                              link = c("identity", "log"),
+                                                              link = c("identity", "log", "softplus"),
                                                               suppress_warnings = TRUE) {
   link <- match.arg(link)
   fit_at_beta <- function(beta_value) {
@@ -2184,7 +2187,7 @@ matern_objective_breakdown <- function(fit,
 .matern_observation_terms <- function(eta,
                                       x,
                                       s,
-                                      link = c("identity", "log"),
+                                      link = c("identity", "log", "softplus"),
                                       laplace_curvature = c("observed", "fisher")) {
   link <- match.arg(link)
   laplace_curvature <- match.arg(laplace_curvature)
@@ -2195,7 +2198,7 @@ matern_objective_breakdown <- function(fit,
     mu <- eta
     grad <- (mu - x) / (s^2)
     hess_diag <- 1 / (s^2)
-  } else {
+  } else if (identical(link, "log")) {
     if (any(eta > 40)) {
       stop("The log-link linear predictor overflowed during optimization.")
     }
@@ -2206,6 +2209,15 @@ matern_objective_breakdown <- function(fit,
     } else {
       mu * (2 * mu - x) / (s^2)
     }
+  } else {
+    mu <- .softplus_stable(eta)
+    sigmoid <- .sigmoid_stable(eta)
+    grad <- ((mu - x) / (s^2)) * sigmoid
+    hess_diag <- if (identical(laplace_curvature, "fisher")) {
+      (sigmoid^2) / (s^2)
+    } else {
+      ((sigmoid^2) + (mu - x) * sigmoid * (1 - sigmoid)) / (s^2)
+    }
   }
   resid <- x - mu
   nll <- 0.5 * sum((resid / s)^2 + log(2 * pi * s^2))
@@ -2215,7 +2227,7 @@ matern_objective_breakdown <- function(fit,
   list(nll = as.numeric(nll), grad = as.numeric(grad), hess_diag = as.numeric(hess_diag), mu = mu)
 }
 
-.matern_response_moments_from_eta <- function(eta_mean, eta_var, link = c("identity", "log")) {
+.matern_response_moments_from_eta <- function(eta_mean, eta_var, link = c("identity", "log", "softplus")) {
   link <- match.arg(link)
   eta_mean <- as.numeric(eta_mean)
   eta_var <- pmax(as.numeric(eta_var), 0)
@@ -2224,8 +2236,14 @@ matern_objective_breakdown <- function(fit,
     return(list(mean = eta_mean, var = eta_var))
   }
 
-  mean <- exp(eta_mean + 0.5 * eta_var)
-  var <- exp(2 * eta_mean + eta_var) * (exp(eta_var) - 1)
+  if (identical(link, "log")) {
+    mean <- exp(eta_mean + 0.5 * eta_var)
+    var <- exp(2 * eta_mean + eta_var) * (exp(eta_var) - 1)
+  } else {
+    moments <- .softplus_gaussian_moments(eta_mean, eta_var)
+    mean <- moments$mean
+    var <- moments$var
+  }
   list(mean = as.numeric(mean), var = as.numeric(var))
 }
 
@@ -2240,7 +2258,7 @@ matern_objective_breakdown <- function(fit,
                                             beta_init = 0,
                                             initial_mode = NULL,
                                             compute_posterior = TRUE,
-                                            link = c("identity", "log"),
+                                            link = c("identity", "log", "softplus"),
                                             laplace_curvature = c("observed", "fisher")) {
   link <- match.arg(link)
   laplace_curvature <- match.arg(laplace_curvature)
@@ -2429,7 +2447,7 @@ matern_objective_breakdown <- function(fit,
                                                             beta_fixed = NULL,
                                                             beta_prec = NULL,
                                                             beta_init = 0,
-                                                            link = c("identity", "log"),
+                                                            link = c("identity", "log", "softplus"),
                                                             pc_penalty = NULL,
                                                             initial_mode = NULL,
                                                             compute_posterior = TRUE,
@@ -2502,7 +2520,7 @@ matern_objective_breakdown <- function(fit,
                                                               beta_fixed = NULL,
                                                               beta_prec = NULL,
                                                               beta_init = 0,
-                                                              link = c("identity", "log"),
+                                                              link = c("identity", "log", "softplus"),
                                                               pc_penalty = NULL,
                                                               initial_mode = NULL,
                                                               compute_posterior = TRUE,
@@ -2567,7 +2585,7 @@ matern_objective_breakdown <- function(fit,
                                                objective,
                                                beta_mode,
                                                beta_prec = NULL,
-                                               link = c("identity", "log"),
+                                               link = c("identity", "log", "softplus"),
                                                pc_penalty = NULL,
                                                fitted_noise_sd = NULL,
                                                laplace_implementation = "r",
@@ -2593,7 +2611,7 @@ matern_objective_breakdown <- function(fit,
     if (!isTRUE(objective$integrated_beta)) {
       eta_s <- sweep(eta_s, 1, objective$fitted_beta, `+`)
     }
-    if (identical(link, "identity")) t(eta_s) else t(exp(eta_s))
+    if (identical(link, "identity")) t(eta_s) else if (identical(link, "log")) t(exp(eta_s)) else t(.softplus_stable(eta_s))
   }
 
   out <- list(
@@ -2694,8 +2712,51 @@ matern_objective_breakdown <- function(fit,
   NULL
 }
 
+.matern_laplace_tmb_unavailable_reason <- function(alpha, beta_mode, fixed_log_names = character()) {
+  reason <- .matern_laplace_tmb_unsupported_reason(alpha = alpha, beta_mode = beta_mode)
+  if (!is.null(reason)) {
+    return(reason)
+  }
+  if (length(fixed_log_names) == 1L) {
+    return("The TMB Matern Laplace implementation currently supports fixing both `range` and `sigma`, or neither, but not exactly one of them.")
+  }
+  NULL
+}
+
 .matern_laplace_tmb_supported <- function(alpha, beta_mode) {
   is.null(.matern_laplace_tmb_unsupported_reason(alpha = alpha, beta_mode = beta_mode))
+}
+
+.matern_laplace_tmb_failure_message <- function(reason,
+                                                link,
+                                                backend_use,
+                                                learn_noise,
+                                                fixed_log_names = character()) {
+  noise_label <- if (isTRUE(learn_noise)) "learned" else "known"
+  msg <- paste0(
+    "Matern TMB Laplace fit failed: ", reason, "\n",
+    "  link = \"", link, "\", backend = \"", backend_use, "\", noise = ", noise_label, ".\n",
+    "  Public `backend = \"laplace\"` and `backend = \"laplace_fisher\"` require a successful TMB fit; ",
+    "they do not fall back to the internal R reference implementation."
+  )
+  if (identical(link, "log")) {
+    msg <- paste0(
+      msg,
+      "\n  If log-link posterior moments are numerically unstable, consider `link = \"softplus\"`."
+    )
+  }
+  if (length(fixed_log_names) == 1L) {
+    msg <- paste0(
+      msg,
+      "\n  For partial hyperparameter fixing, use explicit `backend = \"laplace_r\"` for internal validation only."
+    )
+  } else {
+    msg <- paste0(
+      msg,
+      "\n  Explicit `backend = \"laplace_r\"` is available for internal validation only."
+    )
+  }
+  msg
 }
 
 .matern_pc_prior_vector <- function(pc_penalty) {
@@ -2724,7 +2785,7 @@ matern_objective_breakdown <- function(fit,
                                      d,
                                      beta_mode,
                                      beta_prec = NULL,
-                                     link = c("identity", "log"),
+                                     link = c("identity", "log", "softplus"),
                                      pc_penalty = NULL,
                                      learn_noise = FALSE) {
   link <- match.arg(link)
@@ -2757,7 +2818,7 @@ matern_objective_breakdown <- function(fit,
     betaprec = as.numeric(betaprec_internal),
     matern_alpha = as.numeric(alpha),
     matern_d = as.integer(d),
-    link_id = if (identical(link, "log")) 1L else 0L,
+    link_id = if (identical(link, "identity")) 0L else if (identical(link, "log")) 1L else 2L,
     learn_noise = if (isTRUE(learn_noise)) 1L else 0L,
     use_pc_prior = if (is.null(pc_penalty)) 0L else 1L,
     use_pc_noise_prior = if (!is.null(pc_penalty) && !is.null(pc_penalty$noise)) 1L else 0L,
@@ -2854,7 +2915,7 @@ matern_objective_breakdown <- function(fit,
                                                    beta_fixed = NULL,
                                                    beta_prec = NULL,
                                                    beta_init = 0,
-                                                   link = c("identity", "log"),
+                                                   link = c("identity", "log", "softplus"),
                                                    pc_penalty = NULL,
                                                    log_noise_sd = NULL,
                                                    laplace_curvature = c("observed", "fisher"),
@@ -3049,7 +3110,7 @@ matern_objective_breakdown <- function(fit,
                                                 beta_fixed = NULL,
                                                 beta_prec = NULL,
                                                 pc_penalty = NULL,
-                                                link = c("identity", "log"),
+                                                link = c("identity", "log", "softplus"),
                                                 fix_g = FALSE,
                                                 learn_noise = FALSE,
                                                 noise_sd_init = NULL,
@@ -3167,11 +3228,7 @@ matern_objective_breakdown <- function(fit,
         shift_start(log_range_offset = -log(2), log_sigma_offset = log(2))
       )
     }
-    n_extra_starts <- if (isTRUE(learn_noise)) {
-      matern_n_starts - 1L
-    } else {
-      max(1L, matern_n_starts - 1L)
-    }
+    n_extra_starts <- matern_n_starts - 1L
     if (n_extra_starts > 0L) {
       stepA_starts <- c(stepA_starts, shifted_starts[seq_len(min(n_extra_starts, length(shifted_starts)))])
     }
@@ -3344,7 +3401,7 @@ matern_objective_breakdown <- function(fit,
                                             beta_fixed = NULL,
                                             beta_prec = NULL,
                                             pc_penalty = NULL,
-                                            link = c("identity", "log"),
+                                            link = c("identity", "log", "softplus"),
                                             suppress_warnings = TRUE,
                                             fix_params = character(),
                                             laplace_curvature = c("observed", "fisher")) {
@@ -3437,7 +3494,7 @@ matern_objective_breakdown <- function(fit,
                                               beta_fixed = NULL,
                                               beta_prec = NULL,
                                               pc_penalty = NULL,
-                                              link = c("identity", "log"),
+                                              link = c("identity", "log", "softplus"),
                                               suppress_warnings = TRUE,
                                               fix_params = character(),
                                               laplace_curvature = c("observed", "fisher")) {
@@ -3532,7 +3589,7 @@ matern_objective_breakdown <- function(fit,
                                                      beta_fixed = NULL,
                                                      beta_prec = NULL,
                                                      pc_penalty = NULL,
-                                                     link = c("identity", "log"),
+                                                     link = c("identity", "log", "softplus"),
                                                      suppress_warnings = TRUE,
                                                      fix_g = FALSE,
                                                      matern_n_starts = 1L,
@@ -3543,14 +3600,18 @@ matern_objective_breakdown <- function(fit,
   if (isTRUE(fix_g)) fix_params <- unique(c(fix_params, "range", "sigma"))
   fixed_log_names <- .matern_fixed_log_param_names(fix_params)
   laplace_curvature <- if (identical(backend_use, "laplace_fisher")) "fisher" else "observed"
+  tmb_unavailable_reason <- .matern_laplace_tmb_unavailable_reason(
+    alpha = alpha,
+    beta_mode = beta_mode,
+    fixed_log_names = fixed_log_names
+  )
   use_tmb <- switch(
     backend_use,
-    laplace_fisher = .matern_laplace_tmb_supported(alpha = alpha, beta_mode = beta_mode) && length(fixed_log_names) != 1L,
-    laplace_tmb = TRUE,
+    laplace_fisher = is.null(tmb_unavailable_reason),
+    laplace_tmb = is.null(tmb_unavailable_reason),
     laplace_r = FALSE,
-    laplace = .matern_laplace_tmb_supported(alpha = alpha, beta_mode = beta_mode) && length(fixed_log_names) != 1L
+    laplace = is.null(tmb_unavailable_reason)
   )
-  if (length(fixed_log_names) == 1L) use_tmb <- FALSE
 
   fit_r_reference <- function(tmb_fallback_error = NULL) {
     fit <- .fit_matern_laplace_known_noise(
@@ -3607,13 +3668,32 @@ matern_objective_breakdown <- function(fit,
     if (identical(backend_use, "laplace_tmb")) {
       stop(tmb_invalid_reason, call. = FALSE)
     }
-    return(fit_r_reference(tmb_fallback_error = tmb_invalid_reason))
+    stop(.matern_laplace_tmb_failure_message(
+      reason = tmb_invalid_reason,
+      link = link,
+      backend_use = backend_use,
+      learn_noise = FALSE,
+      fixed_log_names = fixed_log_names
+    ), call. = FALSE)
   }
 
-  if (identical(backend_use, "laplace_tmb")) {
-    stop(.matern_laplace_tmb_unsupported_reason(alpha = alpha, beta_mode = beta_mode))
+  if (identical(backend_use, "laplace_r")) {
+    return(fit_r_reference())
   }
-  fit_r_reference()
+  if (identical(backend_use, "laplace_tmb")) {
+    stop(.matern_laplace_tmb_unavailable_reason(
+      alpha = alpha,
+      beta_mode = beta_mode,
+      fixed_log_names = fixed_log_names
+    ), call. = FALSE)
+  }
+  stop(.matern_laplace_tmb_failure_message(
+    reason = tmb_unavailable_reason,
+    link = link,
+    backend_use = backend_use,
+    learn_noise = FALSE,
+    fixed_log_names = fixed_log_names
+  ), call. = FALSE)
 }
 
 .fit_matern_laplace_dispatch_unknown_noise <- function(x,
@@ -3629,7 +3709,7 @@ matern_objective_breakdown <- function(fit,
                                                        beta_fixed = NULL,
                                                        beta_prec = NULL,
                                                        pc_penalty = NULL,
-                                                       link = c("identity", "log"),
+                                                       link = c("identity", "log", "softplus"),
                                                        suppress_warnings = TRUE,
                                                        fix_g = FALSE,
                                                        matern_n_starts = 1L,
@@ -3640,15 +3720,19 @@ matern_objective_breakdown <- function(fit,
   if (isTRUE(fix_g)) fix_params <- unique(c(fix_params, "range", "sigma"))
   fixed_log_names <- .matern_fixed_log_param_names(fix_params)
   laplace_curvature <- if (identical(backend_use, "laplace_fisher")) "fisher" else "observed"
+  tmb_unavailable_reason <- .matern_laplace_tmb_unavailable_reason(
+    alpha = alpha,
+    beta_mode = beta_mode,
+    fixed_log_names = fixed_log_names
+  )
 
   use_tmb <- switch(
     backend_use,
-    laplace_fisher = .matern_laplace_tmb_supported(alpha = alpha, beta_mode = beta_mode) && length(fixed_log_names) != 1L,
-    laplace_tmb = TRUE,
+    laplace_fisher = is.null(tmb_unavailable_reason),
+    laplace_tmb = is.null(tmb_unavailable_reason),
     laplace_r = FALSE,
-    laplace = .matern_laplace_tmb_supported(alpha = alpha, beta_mode = beta_mode) && length(fixed_log_names) != 1L
+    laplace = is.null(tmb_unavailable_reason)
   )
-  if (length(fixed_log_names) == 1L) use_tmb <- FALSE
 
   fit_r_reference <- function(tmb_fallback_error = NULL) {
     fit <- .fit_matern_laplace_unknown_noise(
@@ -3707,13 +3791,32 @@ matern_objective_breakdown <- function(fit,
     if (identical(backend_use, "laplace_tmb")) {
       stop(tmb_invalid_reason, call. = FALSE)
     }
-    return(fit_r_reference(tmb_fallback_error = tmb_invalid_reason))
+    stop(.matern_laplace_tmb_failure_message(
+      reason = tmb_invalid_reason,
+      link = link,
+      backend_use = backend_use,
+      learn_noise = TRUE,
+      fixed_log_names = fixed_log_names
+    ), call. = FALSE)
   }
 
-  if (identical(backend_use, "laplace_tmb")) {
-    stop(.matern_laplace_tmb_unsupported_reason(alpha = alpha, beta_mode = beta_mode))
+  if (identical(backend_use, "laplace_r")) {
+    return(fit_r_reference())
   }
-  fit_r_reference()
+  if (identical(backend_use, "laplace_tmb")) {
+    stop(.matern_laplace_tmb_unavailable_reason(
+      alpha = alpha,
+      beta_mode = beta_mode,
+      fixed_log_names = fixed_log_names
+    ), call. = FALSE)
+  }
+  stop(.matern_laplace_tmb_failure_message(
+    reason = tmb_unavailable_reason,
+    link = link,
+    backend_use = backend_use,
+    learn_noise = TRUE,
+    fixed_log_names = fixed_log_names
+  ), call. = FALSE)
 }
 
 .fit_matern_exact_known_noise <- function(x,
@@ -4418,7 +4521,9 @@ Matern <- function(theta = NULL, sigma = 1, beta = NULL, beta_prec = NULL) {
 #' \eqn{x_i \sim N(\exp(\beta_0 + (Aw)_i), s_i^2)} with a sparse Fisher
 #' Laplace backend by default, and an independent INLA backend is available for
 #' cross-checking. INLA empirical-Bayes beta fits are implemented by external
-#' profiling over fixed-beta INLA offset fits.
+#' profiling over fixed-beta INLA offset fits. The softplus link fits
+#' \eqn{x_i \sim N(\log(1 + \exp(\beta_0 + (Aw)_i)), s_i^2)} with the package
+#' Laplace backends; INLA does not support this link.
 #'
 #' @details
 #' Let \eqn{w} denote the latent Matern field on the mesh and \eqn{A} the
@@ -4457,19 +4562,26 @@ Matern <- function(theta = NULL, sigma = 1, beta = NULL, beta_prec = NULL) {
 #' quantities retained as diagnostics.
 #'
 #' For log-link fits, \code{backend = "auto"} uses \code{"laplace_fisher"}.
-#' This keeps the conditional mode equal to the mode of the original log
-#' posterior and replaces only the Laplace posterior precision/log-determinant
-#' observation curvature by the Fisher/Gauss-Newton curvature. For log-link
-#' normal observations this replaces
-#' \eqn{\exp(\eta_i)(2\exp(\eta_i)-x_i)/s_i^2} by
-#' \eqn{\exp(2\eta_i)/s_i^2}. Explicit \code{backend = "laplace"},
-#' \code{"laplace_r"}, and \code{"laplace_tmb"} retain observed-Hessian
-#' Laplace semantics. Fisher fits report
+#' For softplus-link fits, it uses \code{"laplace"}. Fisher curvature keeps the
+#' conditional mode equal to the mode of the original log posterior and replaces
+#' only the Laplace posterior precision/log-determinant observation curvature by
+#' the Fisher/Gauss-Newton curvature. For log-link normal observations this
+#' replaces \eqn{\exp(\eta_i)(2\exp(\eta_i)-x_i)/s_i^2} by
+#' \eqn{\exp(2\eta_i)/s_i^2}; softplus uses the analogous squared first
+#' derivative curvature. Explicit \code{backend = "laplace"},
+#' and \code{"laplace_tmb"} retain observed-Hessian Laplace semantics through
+#' the package-owned TMB implementation. Fisher fits report
 #' \code{backend = "laplace_fisher"}, \code{laplace_curvature = "fisher"}, and
 #' \code{log_likelihood_semantics = "laplace_fisher_<beta_mode>"}.
 #' INLA-backed log-link fits report the observed-Hessian Laplace objective
 #' evaluated at the INLA mode, with INLA's native marginal likelihood
 #' quantities retained as diagnostics.
+#'
+#' For non-identity links, posterior moments are reported on the response scale.
+#' The log link uses exact log-normal moment formulas under the marginal
+#' Gaussian Laplace posterior for \eqn{\eta_i}; the softplus link uses fixed
+#' deterministic Gauss-Hermite quadrature for the same marginal Gaussian
+#' approximation.
 #'
 #' @param locations Optional raw locations used to build the Matern mesh and
 #'   projector matrix. Supply either \code{locations} or \code{setup}, but not
@@ -4498,22 +4610,23 @@ Matern <- function(theta = NULL, sigma = 1, beta = NULL, beta_prec = NULL) {
 #'   mode as their primary \code{log_likelihood}; log-link INLA fits store the
 #'   package Laplace objective at the INLA mode.
 #' @param backend Backend choice. \code{"auto"} uses \code{"exact"} for the
-#'   identity link and \code{"laplace_fisher"} for the log link.
-#'   \code{"laplace_fisher"} is available only for \code{link = "log"}.
-#'   \code{"laplace"} uses the observed-Hessian TMB implementation when
-#'   supported, falling back to the observed-Hessian R reference implementation
-#'   otherwise. \code{"laplace_fisher"} uses the same TMB mode and
+#'   identity link, \code{"laplace_fisher"} for the log link, and
+#'   \code{"laplace"} for the softplus link. \code{"laplace_fisher"} is
+#'   available for \code{link = "log"} and \code{link = "softplus"}.
+#'   \code{"laplace"} uses the observed-Hessian TMB implementation and errors
+#'   if that TMB fit is unavailable or invalid. \code{"laplace_fisher"} uses the same TMB mode and
 #'   hyperparameter fit when supported, but builds the returned posterior
 #'   approximation and Fisher Laplace score with Fisher/Gauss-Newton curvature.
-#'   \code{"laplace_r"} forces the observed-Hessian R reference implementation.
+#'   The R reference backend \code{"laplace_r"} is accepted for internal
+#'   validation only and is never reached automatically from public backends.
 #'   \code{"inla"} is the independent INLA implementation and uses the supplied
 #'   \code{pc.penalty}, if any, as the source of PC-prior penalization.
 #'   Compatibility aliases \code{"laplace_tmb"} and \code{"inla_pc"} are still
 #'   accepted.
 #' @param link Link function. \code{"identity"} fits unconstrained Gaussian
-#'   means. \code{"log"} fits positive mean functions and reports posterior
-#'   summaries on the positive response scale. \code{"logit"} and
-#'   \code{"probit"} are reserved and currently unsupported.
+#'   means. \code{"log"} and \code{"softplus"} fit positive mean functions and
+#'   report posterior summaries on the positive response scale. \code{"logit"}
+#'   and \code{"probit"} are reserved and currently unsupported.
 #'
 #' @return A function with signature
 #'   \code{function(x, s, g_init = NULL, fix_g = FALSE, beta_fixed = NULL, beta_prec = NULL, fix_params = character(), output = NULL)}.
@@ -4539,13 +4652,13 @@ ebnm_Matern_generator <- function(locations = NULL,
                                   penalty_range = NULL,
                                   pc.penalty = NULL,
                                   compute_exact_diagnostic = FALSE,
-                                  backend = c("auto", "exact", "laplace", "laplace_fisher", "laplace_r", "inla"),
-                                  link = c("identity", "log", "logit", "probit")) {
+                                  backend = c("auto", "exact", "laplace", "laplace_fisher", "inla"),
+                                  link = c("identity", "log", "softplus", "logit", "probit")) {
 
   backend <- .match_matern_backend_arg(backend)
   link <- match.arg(link)
-  if (!link %in% c("identity", "log")) {
-    stop("The Matern implementation currently supports `link = \"identity\"` and `link = \"log\"` only.")
+  if (!link %in% c("identity", "log", "softplus")) {
+    stop("The Matern implementation currently supports `link = \"identity\"`, `link = \"log\"`, and `link = \"softplus\"` only.")
   }
 
   setup0 <- .resolve_matern_setup(
@@ -4655,6 +4768,9 @@ ebnm_Matern_generator <- function(locations = NULL,
     if (identical(backend_use, "inla") &&
         any(c("range", "sigma") %in% fix_params_use)) {
       stop("`fix_params` values `range` and `sigma` are not supported with the INLA Matern backend.")
+    }
+    if (identical(backend_use, "inla") && identical(link, "softplus")) {
+      stop("`link = \"softplus\"` is not currently supported by the INLA Matern backend; use `backend = \"laplace\"` or `backend = \"laplace_fisher\"`.")
     }
 
     exact_fit_from_state <- function(state,

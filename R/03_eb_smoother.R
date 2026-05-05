@@ -716,7 +716,7 @@ print.summary.eb_smoother_fit <- function(x, ...) {
                                    beta_fixed = NULL,
                                    beta_prec = NULL,
                                    beta_prec_missing = FALSE,
-                                   link = c("identity", "log"),
+                                   link = c("identity", "log", "softplus"),
                                    dll = "EBSmoothr") {
   link <- match.arg(link)
 
@@ -732,7 +732,7 @@ print.summary.eb_smoother_fit <- function(x, ...) {
     stop("length(x) must match nrow(X) and nrow(B) in `setup`.")
   }
 
-  link_id_arg <- if (link == "log") 1L else 0L
+  link_id_arg <- if (identical(link, "identity")) 0L else if (identical(link, "log")) 1L else 2L
   tmbdat <- LGP_setup
   tmbdat$x <- x
   tmbdat$s <- rep(1, n)
@@ -921,13 +921,9 @@ print.summary.eb_smoother_fit <- function(x, ...) {
     free_dim <- pB + pX
   }
 
-  if (tmbdat$link_id == 0L) {
-    post_mean <- eta_mean
-    post_var <- eta_var
-  } else {
-    post_mean <- exp(eta_mean + 0.5 * eta_var)
-    post_var <- exp(2 * eta_mean + eta_var) * (exp(eta_var) - 1)
-  }
+  response_moments <- .lgp_response_moments_from_eta(eta_mean, eta_var, link = link)
+  post_mean <- response_moments$mean
+  post_var <- response_moments$var
 
   posterior <- data.frame(mean = as.numeric(post_mean), var = as.numeric(post_var))
   posterior$second_moment <- posterior$mean^2 + posterior$var
@@ -956,7 +952,7 @@ print.summary.eb_smoother_fit <- function(x, ...) {
       eta_s <- as.matrix(A) %*% t(samps)
     }
 
-    if (tmbdat$link_id == 0L) t(eta_s) else t(exp(eta_s))
+    if (tmbdat$link_id == 0L) t(eta_s) else if (tmbdat$link_id == 1L) t(exp(eta_s)) else t(.softplus_stable(eta_s))
   }
 
   list(
@@ -1036,14 +1032,14 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
   )
 }
 
-.nonspatial_beta_state <- function(beta_mode, beta_hat, beta_prec = NULL) {
+.constant_beta_state <- function(beta_mode, beta_hat, beta_prec = NULL) {
   Constant(
     beta = beta_hat,
     beta_prec = if (identical(beta_mode, "prior_flat")) 0 else beta_prec
   )
 }
 
-.nonspatial_response_moments <- function(beta_mean, beta_var, n, link = c("identity", "log")) {
+.constant_response_moments <- function(beta_mean, beta_var, n, link = c("identity", "log", "softplus")) {
   link <- match.arg(link)
   beta_mean <- as.numeric(beta_mean)[1]
   beta_var <- pmax(as.numeric(beta_var)[1], 0)
@@ -1051,9 +1047,13 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
   if (identical(link, "identity")) {
     mean <- beta_mean
     var <- beta_var
-  } else {
+  } else if (identical(link, "log")) {
     mean <- exp(beta_mean + 0.5 * beta_var)
     var <- exp(2 * beta_mean + beta_var) * (exp(beta_var) - 1)
+  } else {
+    moments <- .softplus_gaussian_moments(beta_mean, beta_var)
+    mean <- moments$mean
+    var <- moments$var
   }
 
   data.frame(
@@ -1063,7 +1063,7 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
   )
 }
 
-.nonspatial_posterior_sampler <- function(beta_hat, beta_var, n, link = c("identity", "log")) {
+.constant_response_sampler <- function(beta_hat, beta_var, n, link = c("identity", "log", "softplus")) {
   link <- match.arg(link)
   beta_hat <- as.numeric(beta_hat)[1]
   beta_var <- pmax(as.numeric(beta_var)[1], 0)
@@ -1077,12 +1077,18 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
     } else {
       rep(beta_hat, nsamp)
     }
-    value <- if (identical(link, "identity")) beta_samp else exp(beta_samp)
+    value <- if (identical(link, "identity")) {
+      beta_samp
+    } else if (identical(link, "log")) {
+      exp(beta_samp)
+    } else {
+      .softplus_stable(beta_samp)
+    }
     matrix(value, nrow = nsamp, ncol = n)
   }
 }
 
-.nonspatial_log_positive_mean_beta <- function(x, w = NULL, nm = "weighted mean") {
+.constant_log_positive_mean_beta <- function(x, w = NULL, nm = "weighted mean") {
   x <- as.numeric(x)
   if (is.null(w)) {
     mu_hat <- mean(x)
@@ -1095,18 +1101,18 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
   log(mu_hat)
 }
 
-.nonspatial_log_beta_interval <- function(beta_start) {
+.constant_log_beta_interval <- function(beta_start) {
   beta_start <- as.numeric(beta_start)[1]
   if (!is.finite(beta_start)) beta_start <- 0
   beta_start + c(-30, 30)
 }
 
-.nonspatial_log_observation_loglik <- function(beta, x, s) {
+.constant_log_observation_loglik <- function(beta, x, s) {
   mu <- exp(as.numeric(beta)[1])
   sum(stats::dnorm(as.numeric(x), mean = mu, sd = as.numeric(s), log = TRUE))
 }
 
-.nonspatial_log_hessian <- function(beta, x, s, beta_prec = 0) {
+.constant_log_hessian <- function(beta, x, s, beta_prec = 0) {
   beta <- as.numeric(beta)[1]
   mu <- exp(beta)
   w <- 1 / (as.numeric(s)^2)
@@ -1116,7 +1122,7 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
   }
 
   nll <- function(b) {
-    -.nonspatial_log_observation_loglik(b, x = x, s = s) +
+    -.constant_log_observation_loglik(b, x = x, s = s) +
       0.5 * as.numeric(beta_prec) * b^2
   }
   eps <- 1e-4
@@ -1127,7 +1133,7 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
   as.numeric(hess_fd)
 }
 
-.fit_nonspatial_log_known_noise <- function(x,
+.fit_constant_log_known_noise <- function(x,
                                             s,
                                             beta_mode,
                                             beta_fixed = NULL,
@@ -1143,10 +1149,10 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
 
   if (beta_mode == "fixed") {
     beta_hat <- .check_single_numeric(beta_fixed, "beta_fixed")
-    log_likelihood <- .nonspatial_log_observation_loglik(beta_hat, x = x, s = s)
+    log_likelihood <- .constant_log_observation_loglik(beta_hat, x = x, s = s)
   } else if (beta_mode == "empirical_bayes") {
-    beta_hat <- .nonspatial_log_positive_mean_beta(x, w = w)
-    log_likelihood <- .nonspatial_log_observation_loglik(beta_hat, x = x, s = s)
+    beta_hat <- .constant_log_positive_mean_beta(x, w = w)
+    log_likelihood <- .constant_log_observation_loglik(beta_hat, x = x, s = s)
   } else if (beta_mode %in% c("prior_flat", "prior_proper")) {
     beta_prec0 <- if (identical(beta_mode, "prior_proper")) {
       beta_prec <- .check_optional_beta_prec(beta_prec, "beta_prec")
@@ -1158,25 +1164,25 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
       0
     }
     beta_start <- if (beta_prec0 == 0) {
-      .nonspatial_log_positive_mean_beta(x, w = w)
+      .constant_log_positive_mean_beta(x, w = w)
     } else {
       positive_x <- x[is.finite(x) & x > 0]
       log(if (length(positive_x)) mean(positive_x) else 1)
     }
     nll <- function(beta) {
-      -.nonspatial_log_observation_loglik(beta, x = x, s = s) +
+      -.constant_log_observation_loglik(beta, x = x, s = s) +
         0.5 * beta_prec0 * beta^2
     }
-    opt <- stats::optimize(nll, interval = .nonspatial_log_beta_interval(beta_start))
+    opt <- stats::optimize(nll, interval = .constant_log_beta_interval(beta_start))
     beta_hat <- as.numeric(opt$minimum)
-    beta_hess <- .nonspatial_log_hessian(beta_hat, x = x, s = s, beta_prec = beta_prec0)
+    beta_hess <- .constant_log_hessian(beta_hat, x = x, s = s, beta_prec = beta_prec0)
     beta_var <- 1 / beta_hess
     log_prior <- if (beta_prec0 > 0) {
       stats::dnorm(beta_hat, mean = 0, sd = 1 / sqrt(beta_prec0), log = TRUE)
     } else {
       0
     }
-    log_likelihood <- .nonspatial_log_observation_loglik(beta_hat, x = x, s = s) +
+    log_likelihood <- .constant_log_observation_loglik(beta_hat, x = x, s = s) +
       log_prior + 0.5 * log(2 * pi) - 0.5 * log(beta_hess)
     log_likelihood_semantics <- paste0("laplace_constant_log_", beta_mode)
   } else {
@@ -1185,15 +1191,15 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
 
   class(log_likelihood) <- "logLik"
   list(
-    posterior = .nonspatial_response_moments(beta_hat, beta_var, n = n, link = "log"),
-    fitted_g = .nonspatial_beta_state(beta_mode, beta_hat, beta_prec = beta_prec),
+    posterior = .constant_response_moments(beta_hat, beta_var, n = n, link = "log"),
+    fitted_g = .constant_beta_state(beta_mode, beta_hat, beta_prec = beta_prec),
     fitted_beta = beta_hat,
     beta_prec = if (identical(beta_mode, "prior_flat")) 0 else beta_prec,
     beta_mode = beta_mode,
     beta_var = beta_var,
     log_likelihood = log_likelihood,
     log_likelihood_semantics = log_likelihood_semantics,
-    posterior_sampler = .nonspatial_posterior_sampler(beta_hat, beta_var, n = n, link = "log"),
+    posterior_sampler = .constant_response_sampler(beta_hat, beta_var, n = n, link = "log"),
     data = .eb_smoother_data_frame(x, s),
     prior_family = "log_constant",
     backend = "exact",
@@ -1201,21 +1207,23 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
   )
 }
 
-.fit_nonspatial_known_noise <- function(x,
+.fit_constant_known_noise <- function(x,
                                         s,
                                         beta_mode,
                                         beta_fixed = NULL,
                                         beta_prec = NULL,
-                                        link = c("identity", "log")) {
+                                        link = c("identity", "log", "softplus")) {
   link <- match.arg(link)
   if (identical(link, "log")) {
-    return(.fit_nonspatial_log_known_noise(
+    return(.fit_constant_log_known_noise(
       x = x,
       s = s,
       beta_mode = beta_mode,
       beta_fixed = beta_fixed,
       beta_prec = beta_prec
     ))
+  } else if (identical(link, "softplus")) {
+    stop("`family = \"constant\"` with `link = \"softplus\"` is not currently supported.")
   }
 
   x <- as.numeric(x)
@@ -1261,18 +1269,18 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
   }
 
   class(log_likelihood) <- "logLik"
-  posterior <- .nonspatial_response_moments(beta_hat, beta_var, n = n, link = "identity")
+  posterior <- .constant_response_moments(beta_hat, beta_var, n = n, link = "identity")
 
   list(
     posterior = posterior,
-    fitted_g = .nonspatial_beta_state(beta_mode, beta_hat, beta_prec = beta_prec),
+    fitted_g = .constant_beta_state(beta_mode, beta_hat, beta_prec = beta_prec),
     fitted_beta = beta_hat,
     beta_prec = if (identical(beta_mode, "prior_flat")) 0 else beta_prec,
     beta_mode = beta_mode,
     beta_var = beta_var,
     log_likelihood = log_likelihood,
     log_likelihood_semantics = paste0("exact_constant_", beta_mode),
-    posterior_sampler = .nonspatial_posterior_sampler(beta_hat, beta_var, n = n, link = "identity"),
+    posterior_sampler = .constant_response_sampler(beta_hat, beta_var, n = n, link = "identity"),
     data = .eb_smoother_data_frame(x, s),
     prior_family = "identity_constant",
     backend = "exact",
@@ -1280,7 +1288,7 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
   )
 }
 
-.fit_nonspatial_log_unknown_noise <- function(x,
+.fit_constant_log_unknown_noise <- function(x,
                                               beta_mode,
                                               beta_fixed = NULL,
                                               beta_prec = NULL) {
@@ -1303,7 +1311,7 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
     noise_sd <- sqrt(sigma2_hat)
     log_likelihood <- -0.5 * n * (log(2 * pi) + 1 + log(sigma2_hat))
   } else if (beta_mode == "empirical_bayes") {
-    beta_hat <- .nonspatial_log_positive_mean_beta(x)
+    beta_hat <- .constant_log_positive_mean_beta(x)
     rss <- sum((x - exp(beta_hat))^2)
     sigma2_hat <- max(rss / n, .Machine$double.eps)
     noise_sd <- sqrt(sigma2_hat)
@@ -1322,7 +1330,7 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
     if (!is.finite(scale0) || scale0 <= 0) scale0 <- 1
     eval_at_log_noise <- function(log_noise_sd) {
       noise <- exp(log_noise_sd)
-      fit_known <- .fit_nonspatial_log_known_noise(
+      fit_known <- .fit_constant_log_known_noise(
         x = x,
         s = rep(noise, n),
         beta_mode = beta_mode,
@@ -1349,8 +1357,8 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
 
   class(log_likelihood) <- "logLik"
   list(
-    posterior = .nonspatial_response_moments(beta_hat, beta_var, n = n, link = "log"),
-    fitted_g = .nonspatial_beta_state(beta_mode, beta_hat, beta_prec = beta_prec),
+    posterior = .constant_response_moments(beta_hat, beta_var, n = n, link = "log"),
+    fitted_g = .constant_beta_state(beta_mode, beta_hat, beta_prec = beta_prec),
     fitted_beta = beta_hat,
     fitted_noise_sd = noise_sd,
     beta_prec = if (identical(beta_mode, "prior_flat")) 0 else beta_prec,
@@ -1358,7 +1366,7 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
     beta_var = beta_var,
     log_likelihood = log_likelihood,
     log_likelihood_semantics = log_likelihood_semantics,
-    posterior_sampler = .nonspatial_posterior_sampler(beta_hat, beta_var, n = n, link = "log"),
+    posterior_sampler = .constant_response_sampler(beta_hat, beta_var, n = n, link = "log"),
     data = .eb_smoother_data_frame(x, rep(noise_sd, n)),
     prior_family = "log_constant_learned_noise",
     backend = "exact",
@@ -1366,19 +1374,21 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
   )
 }
 
-.fit_nonspatial_unknown_noise <- function(x,
+.fit_constant_unknown_noise <- function(x,
                                           beta_mode,
                                           beta_fixed = NULL,
                                           beta_prec = NULL,
-                                          link = c("identity", "log")) {
+                                          link = c("identity", "log", "softplus")) {
   link <- match.arg(link)
   if (identical(link, "log")) {
-    return(.fit_nonspatial_log_unknown_noise(
+    return(.fit_constant_log_unknown_noise(
       x = x,
       beta_mode = beta_mode,
       beta_fixed = beta_fixed,
       beta_prec = beta_prec
     ))
+  } else if (identical(link, "softplus")) {
+    stop("`family = \"constant\"` with `link = \"softplus\"` is not currently supported.")
   }
 
   x <- as.numeric(x)
@@ -1440,11 +1450,11 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
   }
 
   class(log_likelihood) <- "logLik"
-  posterior <- .nonspatial_response_moments(beta_hat, beta_var, n = n, link = "identity")
+  posterior <- .constant_response_moments(beta_hat, beta_var, n = n, link = "identity")
 
   list(
     posterior = posterior,
-    fitted_g = .nonspatial_beta_state(beta_mode, beta_hat, beta_prec = beta_prec),
+    fitted_g = .constant_beta_state(beta_mode, beta_hat, beta_prec = beta_prec),
     fitted_beta = beta_hat,
     fitted_noise_sd = noise_sd,
     beta_prec = if (identical(beta_mode, "prior_flat")) 0 else beta_prec,
@@ -1452,7 +1462,7 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
     beta_var = beta_var,
     log_likelihood = log_likelihood,
     log_likelihood_semantics = paste0("exact_constant_", beta_mode),
-    posterior_sampler = .nonspatial_posterior_sampler(beta_hat, beta_var, n = n, link = "identity"),
+    posterior_sampler = .constant_response_sampler(beta_hat, beta_var, n = n, link = "identity"),
     data = .eb_smoother_data_frame(x, rep(noise_sd, n)),
     prior_family = "identity_constant_learned_noise",
     backend = "exact",
@@ -1565,7 +1575,7 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
 #' instead holds the intercept fixed, while `beta_prec` can be used to switch
 #' to a flat (`0`) or proper (`>0`) Gaussian prior on the intercept. These beta
 #' semantics are on the linear-predictor scale for every link, including
-#' `link = "log"`.
+#' `link = "log"` and `link = "softplus"`.
 #'
 #' @param x Numeric vector of observations.
 #' @param s Observation standard errors. Supply a scalar or length-`length(x)`
@@ -1574,13 +1584,16 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
 #'   `"point_exponential"`, `"point_normal"`, `"point_laplace"`, or `"lgp"`.
 #' @param backend Backend choice. For `family = "matern"`, `"auto"` uses the
 #'   exact Gaussian backend for `link = "identity"` and `"laplace_fisher"` for
-#'   `link = "log"`. Matern also supports explicit `"laplace"`,
-#'   `"laplace_fisher"`, `"laplace_r"`, and `"inla"`. Compatibility aliases
-#'   `"laplace_tmb"` and `"inla_pc"` are still accepted. Explicit
-#'   `"laplace"`, `"laplace_r"`, `"laplace_tmb"`, and `"inla"` retain
-#'   observed-Hessian Laplace semantics for log-link fits. For
-#'   `family = "lgp"`, `"auto"` uses `"tmb"` for the identity link and
-#'   `"laplace_fisher"` for the log link. The `"constant"` and point-mass
+#'   `link = "log"`, and `"laplace"` for `link = "softplus"`. Matern also
+#'   supports explicit `"laplace"`, `"laplace_fisher"`, and `"inla"`.
+#'   Compatibility aliases `"laplace_tmb"` and `"inla_pc"` are still accepted.
+#'   Explicit `"laplace"`, `"laplace_tmb"`, and `"inla"` retain
+#'   observed-Hessian Laplace semantics for log-link and softplus-link fits
+#'   where supported. Public Matern Laplace backends use the package-owned TMB
+#'   implementation or error; the R reference backend `"laplace_r"` is retained
+#'   for internal validation only. For `family = "lgp"`, `"auto"` uses
+#'   `"tmb"` for the identity link, `"laplace_fisher"` for the log link, and
+#'   `"laplace"` for the softplus link. The `"constant"` and point-mass
 #'   reference families support only the exact backend.
 #' @param locations Optional raw spatial locations for the Matern family.
 #' @param setup Family-specific setup object:
@@ -1629,9 +1642,11 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
 #' @param compute_exact_diagnostic If `TRUE`, store the exact Gaussian
 #'   log-likelihood evaluated at the Matern INLA mode.
 #' @param link Link used by the selected family. The Matern family supports
-#'   `"identity"` and `"log"` fits with known or learned noise. The constant
-#'   family supports `"identity"` and `"log"` constant-baseline fits. The L-GP
-#'   family supports `"identity"` and `"log"`.
+#'   `"identity"`, `"log"`, and `"softplus"` fits with known or learned noise.
+#'   The constant family supports `"identity"` and `"log"` constant-baseline
+#'   fits. The L-GP family supports `"identity"`, `"log"`, and `"softplus"`.
+#'   Softplus posterior moments are deterministic Gauss-Hermite transforms of
+#'   each marginal Gaussian Laplace posterior for the linear predictor.
 #' @param ... Additional arguments. `dll` is used for the learned-noise L-GP TMB
 #'   path. `mode`, `scale`, `output`, `optmethod`, and `control` are forwarded
 #'   to the selected `ebnm` point-mass family.
@@ -1683,7 +1698,7 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
 eb_smoother <- function(x,
                         s = NULL,
                         family = c("matern", "constant", "point_exponential", "point_normal", "point_laplace", "lgp"),
-                        backend = c("auto", "exact", "laplace", "laplace_fisher", "laplace_r", "inla"),
+                        backend = c("auto", "exact", "laplace", "laplace_fisher", "inla"),
                         locations = NULL,
                         setup = NULL,
                         g_init = NULL,
@@ -1701,7 +1716,7 @@ eb_smoother <- function(x,
                         profile_s_tol = .Machine$double.eps^0.25,
                         suppress_warnings = TRUE,
                         compute_exact_diagnostic = FALSE,
-                        link = c("identity", "log"),
+                        link = c("identity", "log", "softplus"),
                         ...) {
   beta_prec_missing <- missing(beta_prec)
   alpha_missing <- missing(alpha)
@@ -2385,9 +2400,9 @@ eb_smoother <- function(x,
     } else if (!is.null(g_init) && !is.null(g_init$beta)) {
       .check_optional_beta_vector(g_init$beta, "g_init$beta", expected_length = 1L, allow_null = FALSE)
     } else if (identical(link, "log") && s_known) {
-      .nonspatial_log_positive_mean_beta(x, w = 1 / (s_vec^2), nm = "initial weighted mean")
+      .constant_log_positive_mean_beta(x, w = 1 / (s_vec^2), nm = "initial weighted mean")
     } else if (identical(link, "log")) {
-      .nonspatial_log_positive_mean_beta(x, nm = "initial mean")
+      .constant_log_positive_mean_beta(x, nm = "initial mean")
     } else if (s_known) {
       stats::weighted.mean(x, w = 1 / (s_vec^2))
     } else {
@@ -2399,7 +2414,7 @@ eb_smoother <- function(x,
     )
 
     if (s_known) {
-      fit <- .fit_nonspatial_known_noise(
+      fit <- .fit_constant_known_noise(
         x = x,
         s = s_vec,
         beta_mode = beta_mode,
@@ -2419,13 +2434,13 @@ eb_smoother <- function(x,
       )
     }
 
-    fit <- .fit_nonspatial_unknown_noise(
+    fit <- .fit_constant_unknown_noise(
       x = x,
-        beta_mode = beta_mode,
-        beta_fixed = beta_fixed_use,
-        beta_prec = beta_prec_use,
-        link = link
-      )
+      beta_mode = beta_mode,
+      beta_fixed = beta_fixed_use,
+      beta_prec = beta_prec_use,
+      link = link
+    )
     fit$g_init <- g_init_resolved
     return(
       .as_eb_smoother_fit(
@@ -2458,12 +2473,15 @@ eb_smoother <- function(x,
   )
 
   backend_use <- if (backend == "auto" || backend == "exact") {
-    if (identical(link, "log")) "laplace_fisher" else "tmb"
+    if (identical(link, "log")) "laplace_fisher" else if (identical(link, "softplus")) "laplace" else "tmb"
   } else {
     backend
   }
-  if (identical(backend_use, "laplace_fisher") && !identical(link, "log")) {
-    stop("`backend = \"laplace_fisher\"` is only available for `link = \"log\"`.")
+  if (identical(backend_use, "laplace_fisher") && !(identical(link, "log") || identical(link, "softplus"))) {
+    stop("`backend = \"laplace_fisher\"` is only available for `link = \"log\"` or `link = \"softplus\"`.")
+  }
+  if (identical(link, "softplus") && identical(backend_use, "tmb")) {
+    stop("`link = \"softplus\"` is not supported with `backend = \"tmb\"`; use `backend = \"laplace\"` or `backend = \"laplace_fisher\"`.")
   }
   if (!(backend_use %in% c("tmb", "laplace", "laplace_fisher"))) {
     stop("Unsupported backend for `family = \"lgp\"`.")
