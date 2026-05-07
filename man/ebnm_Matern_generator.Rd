@@ -13,7 +13,8 @@ ebnm_Matern_generator(
   penalty_range = NULL,
   pc.penalty = NULL,
   compute_exact_diagnostic = FALSE,
-  backend = c("auto", "exact", "laplace", "laplace_fisher", "inla"),
+  backend = c("auto", "exact", "laplace", "laplace_fisher", "fisher_pql", "inla",
+    "inlabru"),
   link = c("identity", "log", "softplus", "logit", "probit")
 )
 }
@@ -53,17 +54,31 @@ mode as their primary \code{log_likelihood}; log-link INLA fits store the
 package Laplace objective at the INLA mode.}
 
 \item{backend}{Backend choice. \code{"auto"} uses \code{"exact"} for the
-identity link, \code{"laplace_fisher"} for the log link, and
-\code{"laplace"} for the softplus link. \code{"laplace_fisher"} is
-available for \code{link = "log"} and \code{link = "softplus"}.
+identity link and \code{"fisher_pql"} for the log and softplus links.
+\code{"laplace_fisher"} and \code{"fisher_pql"} are available for
+\code{link = "log"} and \code{link = "softplus"}.
 \code{"laplace"} uses the observed-Hessian TMB implementation and errors
 if that TMB fit is unavailable or invalid. \code{"laplace_fisher"} uses the same TMB mode and
 hyperparameter fit when supported, but builds the returned posterior
 approximation and Fisher Laplace score with Fisher/Gauss-Newton curvature.
+\code{"fisher_pql"} is an approximate pseudo-likelihood backend that uses
+three Fisher/PQL pseudo-Gaussian exact Matern Step A updates by default. It
+reports a Fisher/Laplace score evaluated at the final PQL mode; this is an
+approximate PQL-mode score, not a true re-optimized original-model Laplace
+marginal likelihood.
 The R reference backend \code{"laplace_r"} is accepted for internal
 validation only and is never reached automatically from public backends.
 \code{"inla"} is the independent INLA implementation and uses the supplied
 \code{pc.penalty}, if any, as the source of PC-prior penalization.
+\code{"inlabru"} runs the SPDE model through \code{inlabru}'s
+iterative-linearised INLA method and is currently only supported for
+\code{link = "softplus"}; it provides an opt-in alternative to the
+default Laplace path for cross-validation and benchmarking, not an expected
+acceleration path. For known-noise fits, \code{pc.penalty = NULL} keeps the
+non-PC SPDE parameterisation so the prior semantics match the manual
+Laplace default. For learned-noise fits with \code{s = NULL},
+\code{"inlabru"} requires an explicit \code{pc.penalty} list with
+\code{range}, \code{sigma}, and \code{noise} entries.
 Compatibility aliases \code{"laplace_tmb"} and \code{"inla_pc"} are still
 accepted.}
 
@@ -151,21 +166,29 @@ exact Gaussian objective for every backend. INLA-backed identity fits report
 that exact objective evaluated at the INLA mode, with INLA's native Step A
 quantities retained as diagnostics.
 
-For log-link fits, \code{backend = "auto"} uses \code{"laplace_fisher"}.
-For softplus-link fits, it uses \code{"laplace"}. Fisher curvature keeps the
-conditional mode equal to the mode of the original log posterior and replaces
-only the Laplace posterior precision/log-determinant observation curvature by
-the Fisher/Gauss-Newton curvature. For log-link normal observations this
-replaces \eqn{\exp(\eta_i)(2\exp(\eta_i)-x_i)/s_i^2} by
+For log-link and softplus-link fits, \code{backend = "auto"} uses
+\code{"fisher_pql"}. Fisher-PQL builds repeated pseudo-Gaussian exact Matern
+Step A fits and uses three internal pseudo-response updates by default. It
+reports a Fisher/Laplace score evaluated at the final PQL mode; this is an
+approximate PQL-mode score, not a true re-optimized original-model Laplace
+marginal likelihood. Explicit \code{backend = "laplace"} and
+\code{"laplace_tmb"} retain observed-Hessian Laplace semantics through the
+package-owned TMB implementation. Explicit \code{backend = "laplace_fisher"}
+keeps the conditional mode equal to the mode of the original log posterior
+and replaces only the Laplace posterior precision/log-determinant observation
+curvature by the Fisher/Gauss-Newton curvature. For log-link normal
+observations this replaces
+\eqn{\exp(\eta_i)(2\exp(\eta_i)-x_i)/s_i^2} by
 \eqn{\exp(2\eta_i)/s_i^2}; softplus uses the analogous squared first
-derivative curvature. Explicit \code{backend = "laplace"},
-and \code{"laplace_tmb"} retain observed-Hessian Laplace semantics through
-the package-owned TMB implementation. Fisher fits report
+derivative curvature. Fisher-Laplace fits report
 \code{backend = "laplace_fisher"}, \code{laplace_curvature = "fisher"}, and
 \code{log_likelihood_semantics = "laplace_fisher_<beta_mode>"}.
 INLA-backed log-link fits report the observed-Hessian Laplace objective
 evaluated at the INLA mode, with INLA's native marginal likelihood
 quantities retained as diagnostics.
+Inlabru-backed softplus fits likewise report the package observed-Hessian
+Laplace objective evaluated at the inlabru fitted hyperparameters, with
+inlabru's native marginal likelihood retained as a diagnostic.
 
 For non-identity links, posterior moments are reported on the response scale.
 The log link uses exact log-normal moment formulas under the marginal

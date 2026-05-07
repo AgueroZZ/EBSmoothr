@@ -9,7 +9,8 @@ eb_smoother(
   s = NULL,
   family = c("matern", "constant", "point_exponential", "point_normal", "point_laplace",
     "lgp"),
-  backend = c("auto", "exact", "laplace", "laplace_fisher", "inla"),
+  backend = c("auto", "exact", "laplace", "laplace_fisher", "fisher_pql", "inla",
+    "inlabru"),
   locations = NULL,
   setup = NULL,
   g_init = NULL,
@@ -41,9 +42,22 @@ vector for known noise, or \code{NULL} to learn one common scalar SD.}
 \code{"point_exponential"}, \code{"point_normal"}, \code{"point_laplace"}, or \code{"lgp"}.}
 
 \item{backend}{Backend choice. For \code{family = "matern"}, \code{"auto"} uses the
-exact Gaussian backend for \code{link = "identity"} and \code{"laplace_fisher"} for
-\code{link = "log"}, and \code{"laplace"} for \code{link = "softplus"}. Matern also
-supports explicit \code{"laplace"}, \code{"laplace_fisher"}, and \code{"inla"}.
+exact Gaussian backend for \code{link = "identity"} and \code{"fisher_pql"} for
+\code{link = "log"} and \code{link = "softplus"}. Matern also
+supports explicit \code{"laplace"}, \code{"laplace_fisher"}, \code{"fisher_pql"},
+\code{"inla"}, and \code{"inlabru"}. The \code{"fisher_pql"} backend is an approximate
+Fisher/PQL backend for non-identity Matern fits. It uses three
+pseudo-Gaussian exact Matern Step A updates by default and reports a
+Fisher/Laplace score evaluated at the final PQL mode, not a true
+re-optimized original-model Laplace marginal likelihood. The \code{"inlabru"}
+backend runs
+the SPDE model through
+\code{inlabru}'s iterative-linearised INLA method and is currently only
+supported for \code{link = "softplus"}. It is an experimental validation
+backend, not an expected acceleration path. For known-noise fits,
+\code{pc.penalty = NULL} keeps the non-PC SPDE parameterisation; learned-noise
+inlabru fits with \code{s = NULL} require an explicit \code{pc.penalty} list with
+\code{range}, \code{sigma}, and \code{noise} entries.
 Compatibility aliases \code{"laplace_tmb"} and \code{"inla_pc"} are still accepted.
 Explicit \code{"laplace"}, \code{"laplace_tmb"}, and \code{"inla"} retain
 observed-Hessian Laplace semantics for log-link and softplus-link fits

@@ -505,12 +505,17 @@
   diagnostic_fields <- c(
     "log_likelihood_stepA_penalized",
     "log_likelihood_stepA_mlik_integration",
+    "log_likelihood_inlabru_mlik_integration",
+    "log_likelihood_laplace_at_inlabru_params",
+    "log_likelihood_fisher_pql_stepA",
+    "log_likelihood_original_at_fisher_pql_mode",
     "log_likelihood_stepA_mlik_gaussian",
     "log_likelihood_stepA_joint_log_posterior",
     "log_likelihood_exact_at_stepA_mode",
     "log_likelihood_stepA",
     "log_likelihood_stepB_joint",
     "log_likelihood_stepB_laplace",
+    "fisher_pql_diagnostics",
     "inla_validation"
   )
 
@@ -1583,9 +1588,22 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
 #' @param family Smoother family. One of `"matern"`, `"constant"`,
 #'   `"point_exponential"`, `"point_normal"`, `"point_laplace"`, or `"lgp"`.
 #' @param backend Backend choice. For `family = "matern"`, `"auto"` uses the
-#'   exact Gaussian backend for `link = "identity"` and `"laplace_fisher"` for
-#'   `link = "log"`, and `"laplace"` for `link = "softplus"`. Matern also
-#'   supports explicit `"laplace"`, `"laplace_fisher"`, and `"inla"`.
+#'   exact Gaussian backend for `link = "identity"` and `"fisher_pql"` for
+#'   `link = "log"` and `link = "softplus"`. Matern also
+#'   supports explicit `"laplace"`, `"laplace_fisher"`, `"fisher_pql"`,
+#'   `"inla"`, and `"inlabru"`. The `"fisher_pql"` backend is an approximate
+#'   Fisher/PQL backend for non-identity Matern fits. It uses three
+#'   pseudo-Gaussian exact Matern Step A updates by default and reports a
+#'   Fisher/Laplace score evaluated at the final PQL mode, not a true
+#'   re-optimized original-model Laplace marginal likelihood. The `"inlabru"`
+#'   backend runs
+#'   the SPDE model through
+#'   `inlabru`'s iterative-linearised INLA method and is currently only
+#'   supported for `link = "softplus"`. It is an experimental validation
+#'   backend, not an expected acceleration path. For known-noise fits,
+#'   `pc.penalty = NULL` keeps the non-PC SPDE parameterisation; learned-noise
+#'   inlabru fits with `s = NULL` require an explicit `pc.penalty` list with
+#'   `range`, `sigma`, and `noise` entries.
 #'   Compatibility aliases `"laplace_tmb"` and `"inla_pc"` are still accepted.
 #'   Explicit `"laplace"`, `"laplace_tmb"`, and `"inla"` retain
 #'   observed-Hessian Laplace semantics for log-link and softplus-link fits
@@ -1698,7 +1716,7 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
 eb_smoother <- function(x,
                         s = NULL,
                         family = c("matern", "constant", "point_exponential", "point_normal", "point_laplace", "lgp"),
-                        backend = c("auto", "exact", "laplace", "laplace_fisher", "inla"),
+                        backend = c("auto", "exact", "laplace", "laplace_fisher", "fisher_pql", "inla", "inlabru"),
                         locations = NULL,
                         setup = NULL,
                         g_init = NULL,
@@ -1903,6 +1921,62 @@ eb_smoother <- function(x,
         any(c("range", "sigma") %in% fix_params_use)) {
       stop("`fix_params` values `range` and `sigma` are not supported with the INLA Matern backend.")
     }
+
+    if (identical(backend_use, "fisher_pql")) {
+      fit <- if (s_known) .fit_matern_fisher_pql_known_noise(
+        x = x,
+        s = s_vec,
+        A = A,
+        spde_template = spde_template,
+        alpha = alpha,
+        d = d,
+        theta_init = resolved_init$theta_init,
+        sigma_init = resolved_init$sigma_init,
+        beta_init = resolved_init$beta_init,
+        beta_mode = beta_mode,
+        beta_fixed = beta_fixed_use,
+        beta_prec = beta_prec_use,
+        pc_penalty = resolved_init$pc_penalty,
+        link = link,
+        suppress_warnings = suppress_warnings,
+        fix_g = fix_g,
+        fix_params = fix_params_use
+      ) else .fit_matern_fisher_pql_unknown_noise(
+        x = x,
+        A = A,
+        spde_template = spde_template,
+        alpha = alpha,
+        d = d,
+        theta_init = resolved_init$theta_init,
+        sigma_init = resolved_init$sigma_init,
+        noise_sd_init = resolved_init$noise_sd_init,
+        beta_init = resolved_init$beta_init,
+        beta_mode = beta_mode,
+        beta_fixed = beta_fixed_use,
+        beta_prec = beta_prec_use,
+        pc_penalty = resolved_init$pc_penalty,
+        link = link,
+        suppress_warnings = suppress_warnings,
+        fix_g = fix_g,
+        fix_params = fix_params_use
+      )
+      fit$data <- .eb_smoother_data_frame(x, if (s_known) s_vec else fit$fitted_s)
+      fit$g_init <- resolved_init$g_init
+      return(
+        .as_eb_smoother_fit(
+          fit = fit,
+          family = "matern",
+          noise_mode = if (s_known) "fixed" else "estimated",
+          fitted_noise_sd = if (s_known) {
+            if (length(s) == 1L) as.numeric(s) else NA_real_
+          } else {
+            fit$fitted_noise_sd
+          },
+          backend = "fisher_pql"
+        )
+      )
+    }
+
     if (backend_use %in% c("laplace", "laplace_fisher", "laplace_r", "laplace_tmb")) {
       fit <- if (s_known) .fit_matern_laplace_dispatch_known_noise(
         x = x,
@@ -1962,6 +2036,179 @@ eb_smoother <- function(x,
       )
     }
 
+    if (identical(backend_use, "inlabru")) {
+      if (any(c("range", "sigma") %in% fix_params_use)) {
+        stop("`fix_params` values `range` and `sigma` are not supported with the inlabru Matern backend.")
+      }
+      pc_penalty_inlabru <- .matern_inlabru_pc_penalty_policy(
+        pc_penalty_arg = pc.penalty,
+        resolved_pc_penalty = resolved_init$pc_penalty,
+        learn_noise = !s_known
+      )
+      theta_init_inlabru <- .matern_inla_theta_init(
+        log_range = resolved_init$theta_init,
+        log_sigma = log(resolved_init$sigma_init),
+        alpha = alpha,
+        d = d,
+        pc_penalty = pc_penalty_inlabru
+      )
+      if (s_known) {
+        fit <- if (identical(beta_mode, "fixed")) {
+          .fit_matern_inlabru_stepA_fixed_beta(
+            x = x, s = s_vec, A = A, mesh = mesh, alpha = alpha, d = d,
+            locations = loc_mat,
+            theta_init = theta_init_inlabru,
+            beta_fixed = beta_fixed_use,
+            pc_penalty = pc_penalty_inlabru,
+            link = link,
+            suppress_warnings = suppress_warnings
+          )
+        } else {
+          .fit_matern_inlabru_stepA(
+            x = x, s = s_vec, A = A, mesh = mesh, alpha = alpha, d = d,
+            locations = loc_mat,
+            theta_init = theta_init_inlabru,
+            beta_init = resolved_init$beta_init,
+            beta_prec = if (identical(beta_mode, "prior_proper")) beta_prec_use else 0,
+            pc_penalty = pc_penalty_inlabru,
+            link = link,
+            suppress_warnings = suppress_warnings
+          )
+        }
+
+        comparable_objective <- .matern_inlabru_known_laplace_objective(
+          fit = fit,
+          x = x,
+          s = s_vec,
+          A = A,
+          spde_template = spde_template,
+          alpha = alpha,
+          d = d,
+          beta_mode = beta_mode,
+          beta_fixed = beta_fixed_use,
+          beta_prec = if (identical(beta_mode, "prior_flat")) 0 else beta_prec_use,
+          link = link,
+          pc_penalty = pc_penalty_inlabru,
+          suppress_warnings = suppress_warnings
+        )
+        log_likelihood <- as.numeric(comparable_objective$log_marginal)
+        class(log_likelihood) <- "logLik"
+        out <- list(
+          posterior = fit$posterior,
+          fitted_g = fit$fitted_g,
+          fitted_beta = fit$fitted_beta,
+          beta_prec = if (identical(beta_mode, "prior_flat")) 0 else beta_prec_use,
+          beta_mode = beta_mode,
+          g_init = resolved_init$g_init,
+          log_likelihood = log_likelihood,
+          log_likelihood_semantics = paste0("laplace_at_inlabru_params_", beta_mode),
+          posterior_sampler = function(nsamp) .posterior_sampler_unavailable(nsamp, length(x)),
+          data = .eb_smoother_data_frame(x, s_vec),
+          prior_family = paste0(link, "_Matern_inlabru"),
+          posterior_spatial_field = fit$posterior_spatial_field,
+          mesh = mesh,
+          inla_result = fit$result,
+          backend = "inlabru",
+          link = link,
+          pc_penalty = pc_penalty_inlabru,
+          log_likelihood_laplace_at_inlabru_params = as.numeric(comparable_objective$log_marginal),
+          log_likelihood_inlabru_mlik_integration = fit$log_likelihood_inlabru_mlik_integration,
+          log_likelihood_stepA_mlik_integration = fit$log_likelihood_stepA_mlik_integration,
+          beta_profile_optimization = fit$beta_profile_optimization,
+          beta_profile_objective = fit$beta_profile_objective,
+          matern_objective_context = list(A = A, spde_template = spde_template,
+                                           alpha = alpha, d = d)
+        )
+        return(
+          .as_eb_smoother_fit(
+            fit = out,
+            family = "matern",
+            noise_mode = "fixed",
+            fitted_noise_sd = if (length(s) == 1L) as.numeric(s) else NA_real_,
+            backend = "inlabru"
+          )
+        )
+      }
+
+      fit <- if (identical(beta_mode, "fixed")) {
+        .fit_matern_inlabru_stepA_unknown_noise_fixed_beta(
+          x = x, A = A, mesh = mesh, alpha = alpha, d = d,
+          locations = loc_mat,
+          theta_init = theta_init_inlabru,
+          noise_sd_init = resolved_init$noise_sd_init,
+          beta_fixed = beta_fixed_use,
+          pc_penalty = pc_penalty_inlabru,
+          link = link,
+          suppress_warnings = suppress_warnings
+        )
+      } else {
+        .fit_matern_inlabru_stepA_unknown_noise(
+          x = x, A = A, mesh = mesh, alpha = alpha, d = d,
+          locations = loc_mat,
+          theta_init = theta_init_inlabru,
+          noise_sd_init = resolved_init$noise_sd_init,
+          beta_init = resolved_init$beta_init,
+          beta_prec = if (identical(beta_mode, "prior_proper")) beta_prec_use else 0,
+          pc_penalty = pc_penalty_inlabru,
+          link = link,
+          suppress_warnings = suppress_warnings
+        )
+      }
+
+      comparable_objective <- .matern_inlabru_unknown_laplace_objective(
+        fit = fit,
+        x = x,
+        A = A,
+        spde_template = spde_template,
+        alpha = alpha,
+        d = d,
+        beta_mode = beta_mode,
+        beta_fixed = beta_fixed_use,
+        beta_prec = if (identical(beta_mode, "prior_flat")) 0 else beta_prec_use,
+        link = link,
+        pc_penalty = pc_penalty_inlabru,
+        suppress_warnings = suppress_warnings
+      )
+      log_likelihood <- as.numeric(comparable_objective$log_marginal)
+      class(log_likelihood) <- "logLik"
+      out <- list(
+        posterior = fit$posterior,
+        fitted_g = fit$fitted_g,
+        fitted_beta = fit$fitted_beta,
+        fitted_noise_sd = fit$fitted_noise_sd,
+        beta_prec = if (identical(beta_mode, "prior_flat")) 0 else beta_prec_use,
+        beta_mode = beta_mode,
+        g_init = resolved_init$g_init,
+        log_likelihood = log_likelihood,
+        log_likelihood_semantics = paste0("laplace_at_inlabru_params_learned_noise_", beta_mode),
+        posterior_sampler = function(nsamp) .posterior_sampler_unavailable(nsamp, length(x)),
+        data = .eb_smoother_data_frame(x, rep(fit$fitted_noise_sd, length(x))),
+        prior_family = paste0(link, "_Matern_inlabru_learned_noise"),
+        posterior_spatial_field = fit$posterior_spatial_field,
+        mesh = mesh,
+        inla_result = fit$result,
+        backend = "inlabru",
+        link = link,
+        pc_penalty = pc_penalty_inlabru,
+        log_likelihood_laplace_at_inlabru_params = as.numeric(comparable_objective$log_marginal),
+        log_likelihood_inlabru_mlik_integration = fit$log_likelihood_inlabru_mlik_integration,
+        log_likelihood_stepA_mlik_integration = fit$log_likelihood_stepA_mlik_integration,
+        beta_profile_optimization = fit$beta_profile_optimization,
+        beta_profile_objective = fit$beta_profile_objective,
+        matern_objective_context = list(A = A, spde_template = spde_template,
+                                         alpha = alpha, d = d)
+      )
+      return(
+        .as_eb_smoother_fit(
+          fit = out,
+          family = "matern",
+          noise_mode = "estimated",
+          fitted_noise_sd = fit$fitted_noise_sd,
+          backend = "inlabru"
+        )
+      )
+    }
+
     if (backend_use == "exact") {
       if (!identical(link, "identity")) {
         stop("`backend = \"exact\"` is only available for `link = \"identity\"`; use `backend = \"laplace\"` for log-link Matern fits.")
@@ -2014,7 +2261,7 @@ eb_smoother <- function(x,
         fix_g = fix_g,
         fix_params = fix_params_use
       )
-      fit$data <- .eb_smoother_data_frame(x, rep(fit$fitted_noise_sd, length(x)))
+      fit$data <- .eb_smoother_data_frame(x, fit$fitted_s)
       fit$g_init <- resolved_init$g_init
       return(
         .as_eb_smoother_fit(

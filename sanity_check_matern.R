@@ -75,3 +75,73 @@ image(
   col = hcl.colors(20, "BluYl")
 )
 fit_2d$log_likelihood
+
+
+# ---- inlabru cross-check on softplus link ----
+if (requireNamespace("inlabru", quietly = TRUE) &&
+    requireNamespace("INLA", quietly = TRUE)) {
+  set.seed(42)
+  loc_sp <- seq(0, 1, length.out = 100)
+  s_sp <- rep(0.08, length(loc_sp))
+  eta_sp <- -0.4 + 1.2 * sin(2 * pi * loc_sp)
+  x_sp <- log1p(exp(eta_sp)) + rnorm(length(loc_sp), sd = s_sp)
+
+  fit_lap <- ebnm_Matern_generator(
+    locations = loc_sp, link = "softplus", backend = "laplace"
+  )(x_sp, s_sp)
+  fit_bru <- ebnm_Matern_generator(
+    locations = loc_sp, link = "softplus", backend = "inlabru"
+  )(x_sp, s_sp)
+
+  cat("\nSoftplus posterior mean: laplace vs inlabru (head)\n")
+  print(cbind(
+    laplace = head(fit_lap$posterior$mean),
+    inlabru = head(fit_bru$posterior$mean)
+  ))
+  cat("\nRange of (laplace - inlabru) posterior mean:",
+      paste(format(range(fit_lap$posterior$mean - fit_bru$posterior$mean),
+                   digits = 3), collapse = ", "),
+      "\n")
+  cat("Range of (laplace - inlabru) posterior var:",
+      paste(format(range(fit_lap$posterior$var - fit_bru$posterior$var),
+                   digits = 3), collapse = ", "),
+      "\n")
+  cat("Hyperparameters (theta, sigma, beta):\n")
+  print(rbind(
+    laplace = c(theta = fit_lap$fitted_g$theta,
+                sigma = fit_lap$fitted_g$sigma,
+                beta  = fit_lap$fitted_beta),
+    inlabru = c(theta = fit_bru$fitted_g$theta,
+                sigma = fit_bru$fitted_g$sigma,
+                beta  = fit_bru$fitted_beta)
+  ))
+
+  # Cross-check eb_smoother (s = NULL) path
+  pc_sp <- list(range = c(0.1, 0.5), sigma = c(0.35, 0.5), noise = c(0.2, 0.5))
+  fit_lap_full <- eb_smoother(
+    x_sp, s = NULL, family = "matern", locations = loc_sp,
+    link = "softplus", backend = "laplace", pc.penalty = pc_sp
+  )
+  fit_bru_full <- eb_smoother(
+    x_sp, s = NULL, family = "matern", locations = loc_sp,
+    link = "softplus", backend = "inlabru", pc.penalty = pc_sp
+  )
+  cat("\neb_smoother fitted_noise_sd: laplace =",
+      format(fit_lap_full$fitted_noise_sd, digits = 4),
+      "  inlabru =",
+      format(fit_bru_full$fitted_noise_sd, digits = 4), "\n")
+
+  if (nzchar(Sys.getenv("EBSMOOTHR_BENCH")) &&
+      requireNamespace("microbenchmark", quietly = TRUE)) {
+    cat("\nBenchmark (5 reps, n =", length(loc_sp), "):\n")
+    print(microbenchmark::microbenchmark(
+      laplace = ebnm_Matern_generator(
+        locations = loc_sp, link = "softplus", backend = "laplace"
+      )(x_sp, s_sp),
+      inlabru = ebnm_Matern_generator(
+        locations = loc_sp, link = "softplus", backend = "inlabru"
+      )(x_sp, s_sp),
+      times = 5L
+    ))
+  }
+}

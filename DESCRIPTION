@@ -1,7 +1,7 @@
 Package: EBSmoothr
 Type: Package
 Title: Empirical Bayes Smoothing with L-GP and Matern Priors
-Version: 0.2.1
+Version: 0.2.3
 Authors@R: c(
     person(
       "EBSmoothr", "Developers",
@@ -36,7 +36,8 @@ Imports:
     INLA
 Suggests:
     testthat (>= 3.0.0),
-    flashier
+    flashier,
+    inlabru
 LinkingTo:
     TMB,
     RcppEigen

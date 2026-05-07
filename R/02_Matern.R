@@ -1,4 +1,6 @@
 # ---- helper: normalize locations and build mesh/A for d = 1 or 2 ----
+utils::globalVariables(".scale_w")
+
 .normalize_locations <- function(locations) {
   if (is.data.frame(locations)) locations <- as.matrix(locations)
 
@@ -91,11 +93,8 @@
     return("exact")
   }
 
-  if (identical(link, "log")) {
-    return("laplace_fisher")
-  }
-  if (identical(link, "softplus")) {
-    return("laplace")
+  if (identical(link, "log") || identical(link, "softplus")) {
+    return("fisher_pql")
   }
 
   "laplace"
@@ -122,6 +121,12 @@
   if (identical(backend, "laplace_fisher") && !(identical(link, "log") || identical(link, "softplus"))) {
     stop("`backend = \"laplace_fisher\"` is only available for `link = \"log\"` or `link = \"softplus\"`.")
   }
+  if (identical(backend, "fisher_pql") && !(identical(link, "log") || identical(link, "softplus"))) {
+    stop("`backend = \"fisher_pql\"` is only available for `link = \"log\"` or `link = \"softplus\"`.")
+  }
+  if (identical(backend, "inlabru") && !identical(link, "softplus")) {
+    stop("`backend = \"inlabru\"` is currently only supported for `link = \"softplus\"`.")
+  }
   if (identical(backend, "exact") && (identical(link, "log") || identical(link, "softplus"))) {
     return("laplace")
   }
@@ -129,7 +134,7 @@
 }
 
 .match_matern_backend_arg <- function(backend) {
-  choices <- c("auto", "exact", "laplace", "laplace_fisher", "laplace_r", "inla", "laplace_tmb", "inla_pc")
+  choices <- c("auto", "exact", "laplace", "laplace_fisher", "fisher_pql", "laplace_r", "inla", "laplace_tmb", "inla_pc", "inlabru")
   if (length(backend) > 1L) backend <- backend[1L]
   match.arg(backend, choices = choices)
 }
@@ -397,6 +402,21 @@
   )
 }
 
+.exact_matern_unknown_noise_s <- function(noise_sd, n, noise_scale = NULL) {
+  if (is.null(noise_scale)) {
+    return(rep(noise_sd, n))
+  }
+
+  noise_scale <- as.numeric(noise_scale)
+  if (length(noise_scale) != n ||
+      anyNA(noise_scale) ||
+      any(!is.finite(noise_scale)) ||
+      any(noise_scale <= 0)) {
+    stop("`noise_scale` must be NULL or a positive finite numeric vector with length equal to `length(x)`.")
+  }
+  as.numeric(noise_sd * noise_scale)
+}
+
 .exact_matern_profile_objective_unknown_noise <- function(x,
                                                           A,
                                                           spde_template,
@@ -404,7 +424,8 @@
                                                           d,
                                                           log_range,
                                                           log_sigma,
-                                                          log_noise_sd) {
+                                                          log_noise_sd,
+                                                          noise_scale = NULL) {
   if (!is.finite(log_noise_sd)) {
     stop("`log_noise_sd` must be finite.")
   }
@@ -414,9 +435,10 @@
     stop("The learned observation noise SD must be positive.")
   }
 
+  s_eff <- .exact_matern_unknown_noise_s(noise_sd, length(x), noise_scale)
   objective <- .exact_matern_profile_objective(
     x = x,
-    s = rep(noise_sd, length(x)),
+    s = s_eff,
     A = A,
     spde_template = spde_template,
     alpha = alpha,
@@ -425,7 +447,8 @@
     log_sigma = log_sigma
   )
   objective$fitted_noise_sd <- as.numeric(noise_sd)
-  objective$s <- rep(noise_sd, length(x))
+  objective$s <- s_eff
+  if (!is.null(noise_scale)) objective$noise_scale <- as.numeric(noise_scale)
   objective
 }
 
@@ -437,7 +460,8 @@
                                                         log_range,
                                                         log_sigma,
                                                         beta0,
-                                                        log_noise_sd) {
+                                                        log_noise_sd,
+                                                        noise_scale = NULL) {
   beta0 <- .check_single_numeric(beta0, "beta0")
   if (!is.finite(log_noise_sd)) {
     stop("`log_noise_sd` must be finite.")
@@ -448,9 +472,10 @@
     stop("The learned observation noise SD must be positive.")
   }
 
+  s_eff <- .exact_matern_unknown_noise_s(noise_sd, length(x), noise_scale)
   objective <- .exact_matern_fixed_objective(
     x = x,
-    s = rep(noise_sd, length(x)),
+    s = s_eff,
     A = A,
     spde_template = spde_template,
     alpha = alpha,
@@ -460,7 +485,8 @@
     beta0 = beta0
   )
   objective$fitted_noise_sd <- as.numeric(noise_sd)
-  objective$s <- rep(noise_sd, length(x))
+  objective$s <- s_eff
+  if (!is.null(noise_scale)) objective$noise_scale <- as.numeric(noise_scale)
   objective
 }
 
@@ -472,7 +498,8 @@
                                                         log_range,
                                                         log_sigma,
                                                         beta_prec,
-                                                        log_noise_sd) {
+                                                        log_noise_sd,
+                                                        noise_scale = NULL) {
   beta_prec <- .check_optional_beta_prec(beta_prec, "beta_prec")
   if (is.null(beta_prec) || beta_prec <= 0) {
     stop("`beta_prec` must be positive for the proper-beta objective.")
@@ -486,9 +513,10 @@
     stop("The learned observation noise SD must be positive.")
   }
 
+  s_eff <- .exact_matern_unknown_noise_s(noise_sd, length(x), noise_scale)
   objective <- .exact_matern_prior_objective(
     x = x,
-    s = rep(noise_sd, length(x)),
+    s = s_eff,
     A = A,
     spde_template = spde_template,
     alpha = alpha,
@@ -498,7 +526,8 @@
     beta_prec = beta_prec
   )
   objective$fitted_noise_sd <- as.numeric(noise_sd)
-  objective$s <- rep(noise_sd, length(x))
+  objective$s <- s_eff
+  if (!is.null(noise_scale)) objective$noise_scale <- as.numeric(noise_scale)
   objective
 }
 
@@ -583,6 +612,31 @@
   opt_res$free_names <- free_names
   opt_res$fixed_names <- fixed_names
   opt_res
+}
+
+.matern_exact_optimization_diagnostics <- function(opt_res) {
+  opt <- opt_res$opt
+  if (is.null(opt)) {
+    return(list(
+      method = opt_res$method,
+      convergence = 0L,
+      message = "all exact Gaussian Matern hyperparameters fixed",
+      counts = NULL,
+      value = NA_real_,
+      fixed_names = if (is.null(opt_res$fixed_names)) character() else opt_res$fixed_names,
+      free_names = if (is.null(opt_res$free_names)) character() else opt_res$free_names
+    ))
+  }
+
+  list(
+    method = opt_res$method,
+    convergence = if (is.null(opt$convergence)) NA_integer_ else as.integer(opt$convergence),
+    message = if (is.null(opt$message)) "" else as.character(opt$message),
+    counts = opt$counts,
+    value = as.numeric(opt$value),
+    fixed_names = if (is.null(opt_res$fixed_names)) character() else opt_res$fixed_names,
+    free_names = if (is.null(opt_res$free_names)) character() else opt_res$free_names
+  )
 }
 
 .exact_matern_posterior_from_stats <- function(x, s, A, stats, beta0, log_marginal, beta_prec = NULL) {
@@ -757,7 +811,8 @@
                                               log_range,
                                               log_sigma,
                                               beta0,
-                                              log_noise_sd) {
+                                              log_noise_sd,
+                                              noise_scale = NULL) {
   if (!is.finite(log_noise_sd)) {
     stop("`log_noise_sd` must be finite.")
   }
@@ -767,9 +822,10 @@
     stop("The learned observation noise SD must be positive.")
   }
 
+  s_eff <- .exact_matern_unknown_noise_s(noise_sd, length(x), noise_scale)
   state <- .exact_matern_state(
     x = x,
-    s = rep(noise_sd, length(x)),
+    s = s_eff,
     A = A,
     spde_template = spde_template,
     alpha = alpha,
@@ -779,6 +835,8 @@
     beta0 = beta0
   )
   state$fitted_noise_sd <- as.numeric(noise_sd)
+  state$fitted_s <- s_eff
+  if (!is.null(noise_scale)) state$noise_scale <- as.numeric(noise_scale)
   state
 }
 
@@ -2060,6 +2118,599 @@ matern_objective_breakdown <- function(fit,
   fit
 }
 
+.matern_inlabru_assert_installed <- function() {
+  if (!requireNamespace("inlabru", quietly = TRUE)) {
+    stop(
+      "`backend = \"inlabru\"` requires the `inlabru` package; install it with ",
+      "`install.packages(\"inlabru\")`."
+    )
+  }
+}
+
+.matern_inlabru_assert_softplus <- function(link) {
+  if (!identical(link, "softplus")) {
+    stop("`backend = \"inlabru\"` is currently only supported for `link = \"softplus\"`.")
+  }
+}
+
+.matern_inlabru_pc_penalty_policy <- function(pc_penalty_arg,
+                                              resolved_pc_penalty,
+                                              learn_noise = FALSE) {
+  if (is.null(pc_penalty_arg)) {
+    if (isTRUE(learn_noise)) {
+      stop(
+        "`backend = \"inlabru\"` with `s = NULL` requires an explicit ",
+        "`pc.penalty` list with `range`, `sigma`, and `noise` entries."
+      )
+    }
+    return(NULL)
+  }
+
+  if (!is.list(pc_penalty_arg) || is.null(names(pc_penalty_arg))) {
+    stop("`pc.penalty` must be a named list for `backend = \"inlabru\"`.")
+  }
+  required <- c("range", "sigma", if (isTRUE(learn_noise)) "noise")
+  missing <- setdiff(required, names(pc_penalty_arg))
+  if (length(missing)) {
+    stop(
+      "`backend = \"inlabru\"` requires explicit `pc.penalty` entries: ",
+      paste(sprintf("`%s`", required), collapse = ", "),
+      ". Missing: ",
+      paste(sprintf("`%s`", missing), collapse = ", "),
+      "."
+    )
+  }
+  null_required <- required[vapply(pc_penalty_arg[required], is.null, logical(1))]
+  if (length(null_required)) {
+    stop(
+      "`backend = \"inlabru\"` requires non-NULL `pc.penalty` entries: ",
+      paste(sprintf("`%s`", null_required), collapse = ", "),
+      "."
+    )
+  }
+
+  resolved_pc_penalty
+}
+
+.matern_inlabru_known_laplace_objective <- function(fit,
+                                                    x,
+                                                    s,
+                                                    A,
+                                                    spde_template,
+                                                    alpha,
+                                                    d,
+                                                    beta_mode,
+                                                    beta_fixed = NULL,
+                                                    beta_prec = NULL,
+                                                    link = "softplus",
+                                                    pc_penalty = NULL,
+                                                    suppress_warnings = TRUE) {
+  .matern_laplace_known_noise_objective_at_params(
+    x = x,
+    s = s,
+    A = A,
+    spde_template = spde_template,
+    alpha = alpha,
+    d = d,
+    log_range = fit$fitted_g$theta,
+    log_sigma = log(fit$fitted_g$sigma),
+    beta_mode = beta_mode,
+    beta_fixed = if (identical(beta_mode, "fixed")) fit$fitted_beta else beta_fixed,
+    beta_prec = beta_prec,
+    beta_init = fit$fitted_beta,
+    link = link,
+    pc_penalty = pc_penalty,
+    initial_mode = .matern_inla_laplace_initial_mode(fit, beta_mode),
+    compute_posterior = FALSE,
+    optimize_beta = FALSE,
+    suppress_warnings = suppress_warnings
+  )
+}
+
+.matern_inlabru_unknown_laplace_objective <- function(fit,
+                                                      x,
+                                                      A,
+                                                      spde_template,
+                                                      alpha,
+                                                      d,
+                                                      beta_mode,
+                                                      beta_fixed = NULL,
+                                                      beta_prec = NULL,
+                                                      link = "softplus",
+                                                      pc_penalty = NULL,
+                                                      suppress_warnings = TRUE) {
+  .matern_laplace_unknown_noise_objective_at_params(
+    x = x,
+    A = A,
+    spde_template = spde_template,
+    alpha = alpha,
+    d = d,
+    log_range = fit$fitted_g$theta,
+    log_sigma = log(fit$fitted_g$sigma),
+    log_noise_sd = log(fit$fitted_noise_sd),
+    beta_mode = beta_mode,
+    beta_fixed = if (identical(beta_mode, "fixed")) fit$fitted_beta else beta_fixed,
+    beta_prec = beta_prec,
+    beta_init = fit$fitted_beta,
+    link = link,
+    pc_penalty = pc_penalty,
+    initial_mode = .matern_inla_laplace_initial_mode(fit, beta_mode),
+    compute_posterior = FALSE,
+    optimize_beta = FALSE,
+    suppress_warnings = suppress_warnings
+  )
+}
+
+.matern_inlabru_data_frame <- function(x, locations, d) {
+  df <- data.frame(.Y = as.numeric(x))
+  if (d == 1L) {
+    df$.loc <- as.numeric(locations)
+  } else {
+    df$.loc <- as.matrix(locations)
+  }
+  df
+}
+
+.matern_inlabru_run_iinla <- function(components,
+                                      obs,
+                                      theta_init,
+                                      bru_initial = NULL,
+                                      bru_max_iter = 25L,
+                                      suppress_warnings = TRUE) {
+  options_list <- list(
+    control.inla = list(int.strategy = "eb", strategy = "gaussian"),
+    control.mode = INLA::control.mode(theta = theta_init, restart = TRUE),
+    control.compute = list(mlik = TRUE, hyperpar = TRUE,
+                           return.marginals = FALSE, config = TRUE),
+    bru_max_iter = bru_max_iter,
+    verbose = FALSE
+  )
+  if (!is.null(bru_initial)) options_list$bru_initial <- bru_initial
+
+  runner <- function() inlabru::bru(components, obs, options = options_list)
+  if (suppress_warnings) suppressWarnings(runner()) else runner()
+}
+
+.matern_inlabru_decode_theta <- function(fit, alpha, d, pc_penalty,
+                                         expect_length, noise_offset) {
+  theta_hat <- as.numeric(fit$mode$theta)
+  if (length(theta_hat) == 0L && !is.null(fit$bru_info$model$inla$mode$theta)) {
+    theta_hat <- as.numeric(fit$bru_info$model$inla$mode$theta)
+  }
+  if (length(theta_hat) != expect_length) {
+    stop("The inlabru Matern fit did not return the expected ", expect_length,
+         " hyperparameters.")
+  }
+
+  spde_theta <- if (noise_offset > 0L) theta_hat[(noise_offset + 1L):expect_length]
+                 else theta_hat
+  matern_theta <- .matern_inla_theta_to_matern(
+    theta = spde_theta,
+    alpha = alpha,
+    d = d,
+    pc_penalty = pc_penalty
+  )
+  list(theta_hat = theta_hat, matern_theta = matern_theta)
+}
+
+.matern_inlabru_posterior <- function(fit, locations, d,
+                                      use_intercept,
+                                      beta_offset_value = NULL,
+                                      n_samples = 1000L,
+                                      seed = 1L) {
+  nd <- if (d == 1L) {
+    data.frame(.loc = as.numeric(locations))
+  } else {
+    out <- data.frame(.row = seq_len(nrow(locations)))
+    out$.loc <- as.matrix(locations)
+    out$.row <- NULL
+    out
+  }
+  if (!use_intercept && !is.null(beta_offset_value)) {
+    nd$.beta_offset <- rep(as.numeric(beta_offset_value), nrow(nd))
+  }
+  predictor <- if (use_intercept) {
+    ~ log1p(exp(field + Intercept))
+  } else {
+    ~ log1p(exp(field + .beta_offset))
+  }
+
+  pp <- stats::predict(fit, newdata = nd, formula = predictor,
+                       n.samples = n_samples, seed = seed)
+  posterior <- data.frame(
+    mean = as.numeric(pp$mean),
+    var = as.numeric(pp$sd)^2
+  )
+  posterior$second_moment <- posterior$mean^2 + posterior$var
+
+  list(
+    posterior = posterior,
+    posterior_spatial_field = fit$summary.random[["field"]]
+  )
+}
+
+.matern_inlabru_log_marginal <- function(fit) {
+  mlik <- fit$mlik
+  if (is.null(mlik)) return(NA_real_)
+  rownames_mlik <- rownames(mlik)
+  if ("log marginal-likelihood (integration)" %in% rownames_mlik) {
+    return(as.numeric(mlik["log marginal-likelihood (integration)", 1]))
+  }
+  as.numeric(mlik[1, 1])
+}
+
+.fit_matern_inlabru_stepA <- function(x,
+                                      s,
+                                      A,
+                                      mesh,
+                                      alpha,
+                                      d,
+                                      locations,
+                                      theta_init,
+                                      beta_init = 0,
+                                      beta_prec = 0,
+                                      pc_penalty,
+                                      link = "softplus",
+                                      suppress_warnings = TRUE) {
+  .matern_inlabru_assert_softplus(link)
+  .matern_inlabru_assert_installed()
+  .with_quiet_inla_defaults({
+    n <- length(x)
+    spde <- .build_matern_inla_spde(mesh, alpha, pc_penalty,
+                                     suppress_warnings = suppress_warnings)
+    df <- .matern_inlabru_data_frame(x, locations, d)
+    df$.scale_w <- as.numeric(1 / s^2)
+
+    beta_prec <- .check_optional_beta_prec(beta_prec, "beta_prec")
+    if (is.null(beta_prec)) beta_prec <- 0
+    beta_init <- .check_single_numeric(beta_init, "beta_init")
+
+    components <- ~ Intercept(1, prec.linear = if (beta_prec > 0) beta_prec else 1e-6) +
+      field(.loc, model = spde)
+    formula <- .Y ~ log1p(exp(field + Intercept))
+
+    obs <- inlabru::bru_obs(
+      formula = formula,
+      family = "gaussian",
+      data = df,
+      scale = .scale_w,
+      control.family = list(
+        hyper = list(prec = list(initial = 0, fixed = TRUE))
+      )
+    )
+
+    fit <- .matern_inlabru_run_iinla(
+      components = components,
+      obs = obs,
+      theta_init = theta_init,
+      bru_initial = list(Intercept = beta_init),
+      suppress_warnings = suppress_warnings
+    )
+
+    decoded <- .matern_inlabru_decode_theta(
+      fit, alpha = alpha, d = d, pc_penalty = pc_penalty,
+      expect_length = 2L, noise_offset = 0L
+    )
+    matern_theta <- decoded$matern_theta
+    fitted_beta <- as.numeric(fit$summary.fixed["Intercept", "mean"])
+    post <- .matern_inlabru_posterior(
+      fit, locations = locations, d = d,
+      use_intercept = TRUE
+    )
+
+    list(
+      result = fit,
+      posterior = post$posterior,
+      posterior_spatial_field = post$posterior_spatial_field,
+      fitted_g = Matern(theta = matern_theta$log_range,
+                        sigma = matern_theta$sigma,
+                        beta = fitted_beta,
+                        beta_prec = beta_prec),
+      fitted_beta = fitted_beta,
+      log_likelihood_inlabru_mlik_integration = .matern_inlabru_log_marginal(fit),
+      log_likelihood_stepA_mlik_integration = .matern_inlabru_log_marginal(fit)
+    )
+  })
+}
+
+.fit_matern_inlabru_stepA_fixed_beta <- function(x,
+                                                 s,
+                                                 A,
+                                                 mesh,
+                                                 alpha,
+                                                 d,
+                                                 locations,
+                                                 theta_init,
+                                                 beta_fixed,
+                                                 pc_penalty,
+                                                 link = "softplus",
+                                                 suppress_warnings = TRUE) {
+  .matern_inlabru_assert_softplus(link)
+  .matern_inlabru_assert_installed()
+  .with_quiet_inla_defaults({
+    n <- length(x)
+    beta_fixed <- .check_single_numeric(beta_fixed, "beta_fixed")
+    spde <- .build_matern_inla_spde(mesh, alpha, pc_penalty,
+                                     suppress_warnings = suppress_warnings)
+    df <- .matern_inlabru_data_frame(x, locations, d)
+    df$.scale_w <- as.numeric(1 / s^2)
+    df$.beta_offset <- rep(beta_fixed, n)
+
+    components <- ~ field(.loc, model = spde)
+    formula <- .Y ~ log1p(exp(field + .beta_offset))
+
+    obs <- inlabru::bru_obs(
+      formula = formula,
+      family = "gaussian",
+      data = df,
+      scale = .scale_w,
+      control.family = list(
+        hyper = list(prec = list(initial = 0, fixed = TRUE))
+      )
+    )
+
+    fit <- .matern_inlabru_run_iinla(
+      components = components,
+      obs = obs,
+      theta_init = theta_init,
+      suppress_warnings = suppress_warnings
+    )
+
+    decoded <- .matern_inlabru_decode_theta(
+      fit, alpha = alpha, d = d, pc_penalty = pc_penalty,
+      expect_length = 2L, noise_offset = 0L
+    )
+    matern_theta <- decoded$matern_theta
+    post <- .matern_inlabru_posterior(
+      fit, locations = locations, d = d,
+      use_intercept = FALSE,
+      beta_offset_value = beta_fixed
+    )
+
+    list(
+      result = fit,
+      posterior = post$posterior,
+      posterior_spatial_field = post$posterior_spatial_field,
+      fitted_g = Matern(theta = matern_theta$log_range,
+                        sigma = matern_theta$sigma,
+                        beta = beta_fixed,
+                        beta_prec = NULL),
+      fitted_beta = beta_fixed,
+      log_likelihood_inlabru_mlik_integration = .matern_inlabru_log_marginal(fit),
+      log_likelihood_stepA_mlik_integration = .matern_inlabru_log_marginal(fit)
+    )
+  })
+}
+
+.fit_matern_inlabru_stepA_unknown_noise <- function(x,
+                                                    A,
+                                                    mesh,
+                                                    alpha,
+                                                    d,
+                                                    locations,
+                                                    theta_init,
+                                                    noise_sd_init,
+                                                    beta_init = 0,
+                                                    beta_prec = 0,
+                                                    pc_penalty,
+                                                    link = "softplus",
+                                                    suppress_warnings = TRUE) {
+  .matern_inlabru_assert_softplus(link)
+  .matern_inlabru_assert_installed()
+  .with_quiet_inla_defaults({
+    n <- length(x)
+    spde <- .build_matern_inla_spde(mesh, alpha, pc_penalty,
+                                     suppress_warnings = suppress_warnings)
+    df <- .matern_inlabru_data_frame(x, locations, d)
+
+    noise_hyper <- .matern_pc_noise_hyper(
+      if (is.null(pc_penalty)) NULL else pc_penalty$noise,
+      noise_sd_init = noise_sd_init
+    )
+    beta_prec <- .check_optional_beta_prec(beta_prec, "beta_prec")
+    if (is.null(beta_prec)) beta_prec <- 0
+    beta_init <- .check_single_numeric(beta_init, "beta_init")
+
+    components <- ~ Intercept(1, prec.linear = if (beta_prec > 0) beta_prec else 1e-6) +
+      field(.loc, model = spde)
+    formula <- .Y ~ log1p(exp(field + Intercept))
+
+    obs <- inlabru::bru_obs(
+      formula = formula,
+      family = "gaussian",
+      data = df,
+      control.family = list(hyper = list(prec = noise_hyper))
+    )
+
+    fit <- .matern_inlabru_run_iinla(
+      components = components,
+      obs = obs,
+      theta_init = c(noise_hyper$initial, theta_init),
+      bru_initial = list(Intercept = beta_init),
+      suppress_warnings = suppress_warnings
+    )
+
+    decoded <- .matern_inlabru_decode_theta(
+      fit, alpha = alpha, d = d, pc_penalty = pc_penalty,
+      expect_length = 3L, noise_offset = 1L
+    )
+    theta_hat <- decoded$theta_hat
+    matern_theta <- decoded$matern_theta
+    fitted_beta <- as.numeric(fit$summary.fixed["Intercept", "mean"])
+    post <- .matern_inlabru_posterior(
+      fit, locations = locations, d = d,
+      use_intercept = TRUE
+    )
+
+    list(
+      result = fit,
+      posterior = post$posterior,
+      posterior_spatial_field = post$posterior_spatial_field,
+      fitted_g = Matern(theta = matern_theta$log_range,
+                        sigma = matern_theta$sigma,
+                        beta = fitted_beta,
+                        beta_prec = beta_prec),
+      fitted_beta = fitted_beta,
+      fitted_noise_sd = as.numeric(exp(-0.5 * theta_hat[1])),
+      fitted_log_precision = as.numeric(theta_hat[1]),
+      log_likelihood_inlabru_mlik_integration = .matern_inlabru_log_marginal(fit),
+      log_likelihood_stepA_mlik_integration = .matern_inlabru_log_marginal(fit)
+    )
+  })
+}
+
+.fit_matern_inlabru_stepA_unknown_noise_fixed_beta <- function(x,
+                                                               A,
+                                                               mesh,
+                                                               alpha,
+                                                               d,
+                                                               locations,
+                                                               theta_init,
+                                                               noise_sd_init,
+                                                               beta_fixed,
+                                                               pc_penalty,
+                                                               link = "softplus",
+                                                               suppress_warnings = TRUE) {
+  .matern_inlabru_assert_softplus(link)
+  .matern_inlabru_assert_installed()
+  .with_quiet_inla_defaults({
+    n <- length(x)
+    beta_fixed <- .check_single_numeric(beta_fixed, "beta_fixed")
+    spde <- .build_matern_inla_spde(mesh, alpha, pc_penalty,
+                                     suppress_warnings = suppress_warnings)
+    df <- .matern_inlabru_data_frame(x, locations, d)
+    df$.beta_offset <- rep(beta_fixed, n)
+
+    noise_hyper <- .matern_pc_noise_hyper(
+      if (is.null(pc_penalty)) NULL else pc_penalty$noise,
+      noise_sd_init = noise_sd_init
+    )
+
+    components <- ~ field(.loc, model = spde)
+    formula <- .Y ~ log1p(exp(field + .beta_offset))
+
+    obs <- inlabru::bru_obs(
+      formula = formula,
+      family = "gaussian",
+      data = df,
+      control.family = list(hyper = list(prec = noise_hyper))
+    )
+
+    fit <- .matern_inlabru_run_iinla(
+      components = components,
+      obs = obs,
+      theta_init = c(noise_hyper$initial, theta_init),
+      suppress_warnings = suppress_warnings
+    )
+
+    decoded <- .matern_inlabru_decode_theta(
+      fit, alpha = alpha, d = d, pc_penalty = pc_penalty,
+      expect_length = 3L, noise_offset = 1L
+    )
+    theta_hat <- decoded$theta_hat
+    matern_theta <- decoded$matern_theta
+    post <- .matern_inlabru_posterior(
+      fit, locations = locations, d = d,
+      use_intercept = FALSE,
+      beta_offset_value = beta_fixed
+    )
+
+    list(
+      result = fit,
+      posterior = post$posterior,
+      posterior_spatial_field = post$posterior_spatial_field,
+      fitted_g = Matern(theta = matern_theta$log_range,
+                        sigma = matern_theta$sigma,
+                        beta = beta_fixed,
+                        beta_prec = NULL),
+      fitted_beta = beta_fixed,
+      fitted_noise_sd = as.numeric(exp(-0.5 * theta_hat[1])),
+      fitted_log_precision = as.numeric(theta_hat[1]),
+      log_likelihood_inlabru_mlik_integration = .matern_inlabru_log_marginal(fit),
+      log_likelihood_stepA_mlik_integration = .matern_inlabru_log_marginal(fit)
+    )
+  })
+}
+
+.fit_matern_inlabru_stepA_profile_beta <- function(x,
+                                                   s,
+                                                   A,
+                                                   mesh,
+                                                   spde_template,
+                                                   alpha,
+                                                   d,
+                                                   locations,
+                                                   theta_init,
+                                                   beta_init,
+                                                   pc_penalty,
+                                                   link = "softplus",
+                                                   suppress_warnings = TRUE) {
+  .matern_inlabru_assert_softplus(link)
+
+  fit_at_beta <- function(beta_value) {
+    .fit_matern_inlabru_stepA_fixed_beta(
+      x = x, s = s, A = A, mesh = mesh, alpha = alpha, d = d,
+      locations = locations,
+      theta_init = theta_init,
+      beta_fixed = beta_value,
+      pc_penalty = pc_penalty,
+      link = link,
+      suppress_warnings = suppress_warnings
+    )
+  }
+
+  objective_at_fit <- function(fit, beta_value) {
+    as.numeric(fit$log_likelihood_stepA_mlik_integration)
+  }
+
+  .fit_matern_inla_profile_beta(
+    beta_init = beta_init,
+    fit_at_beta = fit_at_beta,
+    objective_at_fit = objective_at_fit,
+    failure_label = "inlabru Matern beta profiling failed"
+  )
+}
+
+.fit_matern_inlabru_stepA_unknown_noise_profile_beta <- function(x,
+                                                                 A,
+                                                                 mesh,
+                                                                 spde_template,
+                                                                 alpha,
+                                                                 d,
+                                                                 locations,
+                                                                 theta_init,
+                                                                 noise_sd_init,
+                                                                 beta_init,
+                                                                 pc_penalty,
+                                                                 link = "softplus",
+                                                                 suppress_warnings = TRUE) {
+  .matern_inlabru_assert_softplus(link)
+
+  fit_at_beta <- function(beta_value) {
+    .fit_matern_inlabru_stepA_unknown_noise_fixed_beta(
+      x = x, A = A, mesh = mesh, alpha = alpha, d = d,
+      locations = locations,
+      theta_init = theta_init,
+      noise_sd_init = noise_sd_init,
+      beta_fixed = beta_value,
+      pc_penalty = pc_penalty,
+      link = link,
+      suppress_warnings = suppress_warnings
+    )
+  }
+
+  objective_at_fit <- function(fit, beta_value) {
+    as.numeric(fit$log_likelihood_stepA_mlik_integration)
+  }
+
+  .fit_matern_inla_profile_beta(
+    beta_init = beta_init,
+    fit_at_beta = fit_at_beta,
+    objective_at_fit = objective_at_fit,
+    failure_label = "inlabru learned-noise Matern beta profiling failed"
+  )
+}
+
 .fit_matern_inla_stepB <- function(x,
                                    s,
                                    A,
@@ -2595,6 +3246,7 @@ matern_objective_breakdown <- function(fit,
   laplace_curvature <- match.arg(laplace_curvature)
   log_likelihood <- objective$log_marginal
   class(log_likelihood) <- "logLik"
+  eta_var <- pmax(as.numeric(objective$eta_var), 0)
 
   posterior_sampler <- function(nsamp) {
     nsamp <- .check_single_numeric(nsamp, "nsamp")
@@ -2616,6 +3268,11 @@ matern_objective_breakdown <- function(fit,
 
   out <- list(
     posterior = objective$posterior,
+    posterior_eta = data.frame(
+      mean = as.numeric(objective$eta_mean),
+      sd = sqrt(eta_var),
+      var = eta_var
+    ),
     fitted_g = Matern(
       theta = objective$stats$theta_log_range,
       sigma = exp(objective$stats$theta_log_sigma),
@@ -2703,6 +3360,510 @@ matern_objective_breakdown <- function(fit,
   }
 
   NULL
+}
+
+.matern_fisher_pql_link_values <- function(eta, link = c("log", "softplus")) {
+  link <- match.arg(link)
+  eta <- as.numeric(eta)
+  if (identical(link, "log")) {
+    if (any(eta > 40)) {
+      stop("The log-link linear predictor overflowed during Fisher-PQL construction.")
+    }
+    mu <- exp(eta)
+    deriv <- mu
+  } else {
+    mu <- .softplus_stable(eta)
+    deriv <- .sigmoid_stable(eta)
+  }
+  if (any(!is.finite(mu)) || any(!is.finite(deriv))) {
+    stop("Non-finite Fisher-PQL link values.")
+  }
+  list(mu = as.numeric(mu), deriv = as.numeric(deriv))
+}
+
+.matern_fisher_pql_pseudo_response <- function(x,
+                                               eta,
+                                               s = NULL,
+                                               link = c("log", "softplus"),
+                                               g_floor = 1e-6,
+                                               max_floor_fraction = 0.5) {
+  link <- match.arg(link)
+  x <- as.numeric(x)
+  eta <- as.numeric(eta)
+  if (length(eta) != length(x)) {
+    stop("Internal error: Fisher-PQL eta and x lengths differ.")
+  }
+  g_floor <- .check_single_numeric(g_floor, "g_floor")
+  if (!is.finite(g_floor) || g_floor <= 0) {
+    stop("`g_floor` must be positive for Fisher-PQL.")
+  }
+
+  vals <- .matern_fisher_pql_link_values(eta, link = link)
+  floor_used <- vals$deriv < g_floor
+  floor_fraction <- mean(floor_used)
+  if (is.finite(floor_fraction) && floor_fraction > max_floor_fraction) {
+    stop("Fisher-PQL derivative floor dominated the pseudo-response construction.")
+  }
+
+  deriv_eff <- pmax(vals$deriv, g_floor)
+  z <- eta + (x - vals$mu) / deriv_eff
+  noise_scale <- 1 / deriv_eff
+  if (any(!is.finite(z)) || any(!is.finite(noise_scale))) {
+    stop("Non-finite Fisher-PQL pseudo-response.")
+  }
+
+  out <- list(
+    z = as.numeric(z),
+    mu = vals$mu,
+    deriv = vals$deriv,
+    deriv_eff = as.numeric(deriv_eff),
+    noise_scale = as.numeric(noise_scale),
+    floor_fraction = as.numeric(floor_fraction)
+  )
+  if (!is.null(s)) {
+    s_eff <- as.numeric(s) * out$noise_scale
+    if (length(s_eff) != length(x) || anyNA(s_eff) || any(!is.finite(s_eff)) || any(s_eff <= 0)) {
+      stop("Non-finite Fisher-PQL effective observation SD.")
+    }
+    out$s <- as.numeric(s_eff)
+  }
+  out
+}
+
+.matern_fisher_pql_reference_mode_at_params <- function(x,
+                                                       s,
+                                                       A,
+                                                       spde_template,
+                                                       alpha,
+                                                       d,
+                                                       log_range,
+                                                       log_sigma,
+                                                       beta_mode,
+                                                       beta_value = NULL,
+                                                       beta_prec = NULL,
+                                                       beta_start = 0,
+                                                       link = c("log", "softplus"),
+                                                       log_noise_sd = NULL,
+                                                       pql_w_start = NULL,
+                                                       pql_g_floor = 1e-6) {
+  link <- match.arg(link)
+  x <- as.numeric(x)
+  A <- Matrix::Matrix(A, sparse = TRUE)
+  n_obs <- length(x)
+  n_spde <- ncol(A)
+  if (is.null(pql_w_start)) pql_w_start <- rep(0, n_spde)
+  beta_random <- beta_mode %in% c("prior_flat", "prior_proper")
+  beta_for_start <- .check_single_numeric(beta_start, "beta_start")
+  eta_start <- as.numeric(A %*% as.numeric(pql_w_start)) + beta_for_start
+  base_s <- if (is.null(log_noise_sd)) as.numeric(s) else rep(exp(log_noise_sd), n_obs)
+  pseudo <- .matern_fisher_pql_pseudo_response(
+    x = x,
+    eta = eta_start,
+    s = base_s,
+    link = link,
+    g_floor = pql_g_floor
+  )
+  precision <- .matern_precision_from_log_params(
+    spde_template = spde_template,
+    alpha = alpha,
+    d = d,
+    log_range = log_range,
+    log_sigma = log_sigma
+  )
+  Q <- precision$Q
+  w_prec_diag <- 1 / (pseudo$s^2)
+  W <- Matrix::Diagonal(x = w_prec_diag)
+
+  if (isTRUE(beta_random)) {
+    beta_prec0 <- if (identical(beta_mode, "prior_proper")) {
+      beta_prec <- .check_optional_beta_prec(beta_prec, "beta_prec")
+      if (is.null(beta_prec) || beta_prec <= 0) {
+        stop("`beta_prec` must be positive for the proper-beta Fisher-PQL objective.")
+      }
+      beta_prec
+    } else {
+      0
+    }
+    A_eta <- cbind(A, Matrix::Matrix(rep(1, n_obs), ncol = 1, sparse = TRUE))
+    prior_precision <- rbind(
+      cbind(Q, Matrix::Matrix(0, nrow = n_spde, ncol = 1, sparse = TRUE)),
+      cbind(
+        Matrix::Matrix(0, nrow = 1, ncol = n_spde, sparse = TRUE),
+        Matrix::Matrix(beta_prec0, nrow = 1, ncol = 1, sparse = TRUE)
+      )
+    )
+    prior_precision <- Matrix::forceSymmetric(Matrix::Matrix(prior_precision, sparse = TRUE))
+    H <- prior_precision + Matrix::t(A_eta) %*% W %*% A_eta
+    rhs <- as.numeric(Matrix::t(A_eta) %*% (w_prec_diag * pseudo$z))
+    z_mode <- as.numeric(.solve_spd_factor(.factorize_spd(H), rhs))
+    w_mode <- z_mode[seq_len(n_spde)]
+    fitted_beta <- z_mode[length(z_mode)]
+  } else {
+    beta_value <- .check_single_numeric(beta_value, "beta_value")
+    H <- Q + Matrix::t(A) %*% W %*% A
+    rhs <- as.numeric(Matrix::t(A) %*% (w_prec_diag * (pseudo$z - beta_value)))
+    w_mode <- as.numeric(.solve_spd_factor(.factorize_spd(H), rhs))
+    z_mode <- w_mode
+    fitted_beta <- beta_value
+  }
+
+  list(
+    mode = z_mode,
+    w = w_mode,
+    beta = as.numeric(fitted_beta),
+    pseudo = pseudo
+  )
+}
+
+.matern_fisher_pql_mode_par_from_exact_fit <- function(fit, beta_mode) {
+  w_mode <- as.numeric(fit$posterior_spatial_field$mean)
+  if (beta_mode %in% c("prior_flat", "prior_proper")) {
+    return(stats::setNames(c(w_mode, as.numeric(fit$fitted_beta)), c(rep("w", length(w_mode)), "beta")))
+  }
+  stats::setNames(w_mode, rep("w", length(w_mode)))
+}
+
+.matern_fisher_pql_exact_stepA_optA <- function(exact_diag) {
+  list(
+    convergence = if (is.null(exact_diag$convergence)) NA_integer_ else exact_diag$convergence,
+    message = if (is.null(exact_diag$message)) "" else exact_diag$message
+  )
+}
+
+.fit_matern_fisher_pql_exact_stepA <- function(x,
+                                              s,
+                                              A,
+                                              spde_template,
+                                              alpha,
+                                              d,
+                                              theta_init,
+                                              sigma_init,
+                                              beta_init,
+                                              beta_mode,
+                                              beta_fixed = NULL,
+                                              beta_prec = NULL,
+                                              pc_penalty = NULL,
+                                              link = c("log", "softplus"),
+                                              learn_noise = FALSE,
+                                              noise_sd_init = NULL,
+                                              fix_g = FALSE,
+                                              fix_params = character(),
+                                             pql_inner_iter = 3L,
+                                              pql_tol = 1e-4,
+                                              pql_g_floor = 1e-6,
+                                              suppress_warnings = TRUE) {
+  link <- match.arg(link)
+  pql_inner_iter <- .check_single_numeric(pql_inner_iter, "pql_inner_iter")
+  if (!is.finite(pql_inner_iter) || pql_inner_iter < 1 || pql_inner_iter != floor(pql_inner_iter)) {
+    stop("`pql_inner_iter` must be a positive integer for Fisher-PQL.")
+  }
+  pql_inner_iter <- as.integer(pql_inner_iter)
+  pql_tol <- .check_single_numeric(pql_tol, "pql_tol")
+  if (!is.finite(pql_tol) || pql_tol < 0) {
+    stop("`pql_tol` must be non-negative for Fisher-PQL.")
+  }
+  if (isTRUE(fix_g)) fix_params <- unique(c(fix_params, "range", "sigma"))
+  pql_g_floor <- .check_single_numeric(pql_g_floor, "pql_g_floor")
+  if (!is.finite(pql_g_floor) || pql_g_floor <= 0) {
+    stop("`pql_g_floor` must be positive for Fisher-PQL.")
+  }
+  if (isTRUE(learn_noise)) {
+    noise_sd_init <- .check_single_numeric(noise_sd_init, "noise_sd_init")
+    if (!is.finite(noise_sd_init) || noise_sd_init <= 0) {
+      stop("`noise_sd_init` must be positive for learned-noise Fisher-PQL fits.")
+    }
+  }
+
+  beta_start <- if (identical(beta_mode, "fixed")) {
+    .check_single_numeric(beta_fixed, "beta_fixed")
+  } else {
+    as.numeric(beta_init)[1]
+  }
+  eta_current <- as.numeric(A %*% rep(0, ncol(A))) + beta_start
+  theta_current <- theta_init
+  sigma_current <- sigma_init
+  beta_current <- beta_start
+  noise_current <- noise_sd_init
+  pql_floor_fraction <- rep(NA_real_, pql_inner_iter)
+  pql_eta_change <- rep(NA_real_, pql_inner_iter)
+  pql_stepA_log_marginals <- rep(NA_real_, pql_inner_iter)
+  pseudo <- NULL
+  stepA_fit <- NULL
+
+  for (pql_iter in seq_len(pql_inner_iter)) {
+    pseudo <- .matern_fisher_pql_pseudo_response(
+      x = x,
+      eta = eta_current,
+      s = if (isTRUE(learn_noise)) NULL else as.numeric(s),
+      link = link,
+      g_floor = pql_g_floor
+    )
+    pql_floor_fraction[pql_iter] <- pseudo$floor_fraction
+
+    stepA_fit <- if (isTRUE(learn_noise)) {
+      .fit_matern_exact_unknown_noise(
+        x = pseudo$z,
+        A = A,
+        spde_template = spde_template,
+        alpha = alpha,
+        d = d,
+        theta_init = theta_current,
+        sigma_init = sigma_current,
+        noise_sd_init = noise_current,
+        beta_mode = beta_mode,
+        beta_fixed = beta_fixed,
+        beta_prec = beta_prec,
+        pc_penalty = pc_penalty,
+        suppress_warnings = suppress_warnings,
+        fix_g = fix_g,
+        fix_params = fix_params,
+        noise_scale = pseudo$noise_scale
+      )
+    } else {
+      .fit_matern_exact_known_noise(
+        x = pseudo$z,
+        s = pseudo$s,
+        A = A,
+        spde_template = spde_template,
+        alpha = alpha,
+        d = d,
+        theta_init = theta_current,
+        sigma_init = sigma_current,
+        beta_mode = beta_mode,
+        beta_fixed = beta_fixed,
+        beta_prec = beta_prec,
+        pc_penalty = pc_penalty,
+        suppress_warnings = suppress_warnings,
+        fix_g = fix_g,
+        fix_params = fix_params
+      )
+    }
+
+    pql_stepA_log_marginals[pql_iter] <- as.numeric(stepA_fit$log_likelihood)
+    w_current <- as.numeric(stepA_fit$posterior_spatial_field$mean)
+    beta_current <- as.numeric(stepA_fit$fitted_beta)
+    eta_next <- as.numeric(A %*% w_current) + beta_current
+    pql_eta_change[pql_iter] <- max(abs(eta_next - eta_current))
+    eta_current <- eta_next
+    theta_current <- as.numeric(stepA_fit$fitted_g$theta)
+    sigma_current <- as.numeric(stepA_fit$fitted_g$sigma)
+    if (isTRUE(learn_noise)) {
+      noise_current <- as.numeric(stepA_fit$fitted_noise_sd)
+    }
+  }
+
+  exact_diag <- stepA_fit$exact_optimization
+  if (is.null(exact_diag)) {
+    exact_diag <- list(
+      method = "unknown",
+      convergence = NA_integer_,
+      message = "exact Gaussian Step A diagnostics unavailable",
+      counts = NULL,
+      value = NA_real_
+    )
+  }
+  exact_convergence <- if (is.null(exact_diag$convergence)) NA_integer_ else as.integer(exact_diag$convergence)
+  exact_message <- if (is.null(exact_diag$message)) "" else exact_diag$message
+  optA <- .matern_fisher_pql_exact_stepA_optA(exact_diag)
+  pql_stepA_log_marginal <- as.numeric(stepA_fit$log_likelihood)
+  fitted_log_range <- as.numeric(stepA_fit$fitted_g$theta)
+  fitted_log_sigma <- log(as.numeric(stepA_fit$fitted_g$sigma))
+  fitted_log_noise <- if (isTRUE(learn_noise)) log(as.numeric(stepA_fit$fitted_noise_sd)) else NULL
+  fitted_s_original <- if (isTRUE(learn_noise)) rep(as.numeric(stepA_fit$fitted_noise_sd), length(x)) else as.numeric(s)
+  fitted_beta_stepA <- as.numeric(stepA_fit$fitted_beta)
+  mode_par <- .matern_fisher_pql_mode_par_from_exact_fit(stepA_fit, beta_mode = beta_mode)
+
+  objective <- .matern_laplace_tmb_objective_from_mode(
+    x = as.numeric(x),
+    s = as.numeric(fitted_s_original),
+    A = A,
+    spde_template = spde_template,
+    alpha = alpha,
+    d = d,
+    log_range = fitted_log_range,
+    log_sigma = fitted_log_sigma,
+    log_marginal = NA_real_,
+    beta_mode = beta_mode,
+    beta_fixed = beta_fixed,
+    beta_prec = beta_prec,
+    beta_init = fitted_beta_stepA,
+    link = link,
+    pc_penalty = pc_penalty,
+    log_noise_sd = if (isTRUE(learn_noise)) fitted_log_noise else NULL,
+    laplace_curvature = "fisher",
+    optA = optA,
+    mode_par = mode_par,
+    mode_source = "exact_fisher_pql_stepA",
+    mode_convergence = exact_convergence,
+    mode_message = exact_message
+  )
+  final_pseudo <- .matern_fisher_pql_pseudo_response(
+    x = x,
+    eta = objective$eta_mean,
+    s = fitted_s_original,
+    link = link,
+    g_floor = pql_g_floor
+  )
+  exact_counts <- exact_diag$counts
+  exact_outer_iterations <- if (!is.null(exact_counts) && "function" %in% names(exact_counts)) {
+    as.integer(exact_counts[["function"]])
+  } else {
+    NA_integer_
+  }
+  pql_diagnostics <- list(
+    converged = identical(exact_convergence, 0L),
+    inner_iterations = as.integer(pql_inner_iter),
+    stepA_engine = "exact_gaussian",
+    g_floor = as.numeric(pql_g_floor),
+    tol = as.numeric(pql_tol),
+    initial_floor_fraction = pql_floor_fraction[1L],
+    stepA_floor_fraction = pql_floor_fraction[pql_inner_iter],
+    final_floor_fraction = final_pseudo$floor_fraction,
+    eta_change = pql_eta_change,
+    max_eta_change = pql_eta_change[pql_inner_iter],
+    eta_converged = pql_eta_change[pql_inner_iter] <= pql_tol,
+    final_effective_s_range = range(final_pseudo$s),
+    outer_convergence = exact_convergence,
+    outer_message = exact_message,
+    outer_iterations = exact_outer_iterations,
+    outer_evaluations = exact_counts,
+    stepA_n_starts = 1L,
+    stepA_best_start = 1L,
+    stepA_log_marginals = pql_stepA_log_marginals,
+    mode_source = "exact_fisher_pql_stepA",
+    exact_optimization = exact_diag
+  )
+
+  fit <- .matern_laplace_fit_from_objective(
+    x = as.numeric(x),
+    s = as.numeric(fitted_s_original),
+    A = A,
+    spde_template = spde_template,
+    alpha = alpha,
+    d = d,
+    objective = objective,
+    beta_mode = beta_mode,
+    beta_prec = beta_prec,
+    link = link,
+    pc_penalty = pc_penalty,
+    fitted_noise_sd = if (isTRUE(learn_noise)) as.numeric(stepA_fit$fitted_noise_sd) else NULL,
+    laplace_implementation = "exact_fisher_pql",
+    laplace_curvature = "fisher",
+    extra_diagnostics = list(
+      fisher_pql = pql_diagnostics,
+      stepA_log_marginal = pql_stepA_log_marginal,
+      original_at_fisher_pql_mode = as.numeric(objective$log_marginal),
+      fitted_log_noise = if (isTRUE(learn_noise)) fitted_log_noise else NULL
+    )
+  )
+  fit$backend <- "fisher_pql"
+  fit$log_likelihood_semantics <- paste0("fisher_laplace_at_fisher_pql_mode_", beta_mode)
+  fit$log_likelihood_fisher_pql_stepA <- as.numeric(pql_stepA_log_marginal)
+  fit$log_likelihood_original_at_fisher_pql_mode <- as.numeric(fit$log_likelihood)
+  fit$fisher_pql_diagnostics <- pql_diagnostics
+  fit$fisher_pql_mode <- as.numeric(objective$mode)
+  fit$fisher_pql_eta_mode <- as.numeric(objective$eta_mean)
+  fit$fitted_s <- as.numeric(final_pseudo$s)
+  fit$prior_family <- paste0(
+    link,
+    "_Matern_fisher_pql",
+    if (is.null(pc_penalty)) "" else "_pc",
+    if (isTRUE(learn_noise)) "_learned_noise" else ""
+  )
+  fit
+}
+
+.fit_matern_fisher_pql_known_noise <- function(x,
+                                               s,
+                                               A,
+                                               spde_template,
+                                               alpha,
+                                               d,
+                                               theta_init,
+                                               sigma_init,
+                                               beta_init,
+                                               beta_mode,
+                                               beta_fixed = NULL,
+                                               beta_prec = NULL,
+                                               pc_penalty = NULL,
+                                               link = c("log", "softplus"),
+                                               suppress_warnings = TRUE,
+                                               fix_g = FALSE,
+                                               fix_params = character(),
+                                               pql_max_iter = 3L,
+                                               pql_tol = 1e-4,
+                                               pql_g_floor = 1e-6) {
+  link <- match.arg(link)
+  .fit_matern_fisher_pql_exact_stepA(
+    x = x,
+    s = s,
+    A = A,
+    spde_template = spde_template,
+    alpha = alpha,
+    d = d,
+    theta_init = theta_init,
+    sigma_init = sigma_init,
+    beta_init = beta_init,
+    beta_mode = beta_mode,
+    beta_fixed = beta_fixed,
+    beta_prec = beta_prec,
+    pc_penalty = pc_penalty,
+    link = link,
+    learn_noise = FALSE,
+    fix_g = fix_g,
+    fix_params = fix_params,
+    pql_inner_iter = pql_max_iter,
+    pql_tol = pql_tol,
+    pql_g_floor = pql_g_floor,
+    suppress_warnings = suppress_warnings
+  )
+}
+
+.fit_matern_fisher_pql_unknown_noise <- function(x,
+                                                 A,
+                                                 spde_template,
+                                                 alpha,
+                                                 d,
+                                                 theta_init,
+                                                 sigma_init,
+                                                 noise_sd_init,
+                                                 beta_init,
+                                                 beta_mode,
+                                                 beta_fixed = NULL,
+                                                 beta_prec = NULL,
+                                                 pc_penalty = NULL,
+                                                 link = c("log", "softplus"),
+                                                 suppress_warnings = TRUE,
+                                                 fix_g = FALSE,
+                                                 fix_params = character(),
+                                                 pql_max_iter = 3L,
+                                                 pql_tol = 1e-4,
+                                                 pql_g_floor = 1e-6) {
+  link <- match.arg(link)
+  .fit_matern_fisher_pql_exact_stepA(
+    x = x,
+    s = rep(1, length(x)),
+    A = A,
+    spde_template = spde_template,
+    alpha = alpha,
+    d = d,
+    theta_init = theta_init,
+    sigma_init = sigma_init,
+    beta_init = beta_init,
+    beta_mode = beta_mode,
+    beta_fixed = beta_fixed,
+    beta_prec = beta_prec,
+    pc_penalty = pc_penalty,
+    link = link,
+    learn_noise = TRUE,
+    noise_sd_init = noise_sd_init,
+    fix_g = fix_g,
+    fix_params = fix_params,
+    pql_inner_iter = pql_max_iter,
+    pql_tol = pql_tol,
+    pql_g_floor = pql_g_floor,
+    suppress_warnings = suppress_warnings
+  )
 }
 
 .matern_laplace_tmb_unsupported_reason <- function(alpha, beta_mode) {
@@ -2830,6 +3991,7 @@ matern_objective_breakdown <- function(fit,
                                    parameters,
                                    random = NULL,
                                    map = list(),
+                                   inner.control = NULL,
                                    dll = "EBSmoothr") {
   args <- list(
     data = data,
@@ -2839,6 +4001,7 @@ matern_objective_breakdown <- function(fit,
   )
   if (!is.null(random)) args$random <- random
   if (length(map) > 0L) args$map <- map
+  if (!is.null(inner.control)) args$inner.control <- inner.control
   do.call(TMB::MakeADFun, args)
 }
 
@@ -3978,6 +5141,7 @@ matern_objective_breakdown <- function(fit,
     prior_family = if (is.null(pc_penalty)) "identity_Matern" else "identity_Matern_pc_exact",
     pc_penalty = pc_penalty,
     log_likelihood_pc_prior_theta = objective_opt$log_pc_prior_theta,
+    exact_optimization = .matern_exact_optimization_diagnostics(opt_res),
     matern_objective_context = list(
       A = A,
       spde_template = spde_template,
@@ -4001,9 +5165,13 @@ matern_objective_breakdown <- function(fit,
                                             pc_penalty = NULL,
                                             suppress_warnings = TRUE,
                                             fix_g = FALSE,
-                                            fix_params = character()) {
+                                            fix_params = character(),
+                                            noise_scale = NULL) {
   if (isTRUE(fix_g)) fix_params <- unique(c(fix_params, "range", "sigma"))
   fixed_names <- .matern_fixed_log_param_names(fix_params)
+  if (!is.null(noise_scale)) {
+    noise_scale <- .exact_matern_unknown_noise_s(1, length(x), noise_scale)
+  }
   raw_eval_objective <- function(par) {
     if (beta_mode == "empirical_bayes") {
       .exact_matern_profile_objective_unknown_noise(
@@ -4014,7 +5182,8 @@ matern_objective_breakdown <- function(fit,
         d = d,
         log_range = par[["log_range"]],
         log_sigma = par[["log_sigma"]],
-        log_noise_sd = par[["log_noise"]]
+        log_noise_sd = par[["log_noise"]],
+        noise_scale = noise_scale
       )
     } else if (beta_mode == "fixed") {
       .exact_matern_fixed_objective_unknown_noise(
@@ -4026,13 +5195,15 @@ matern_objective_breakdown <- function(fit,
         log_range = par[["log_range"]],
         log_sigma = par[["log_sigma"]],
         beta0 = beta_fixed,
-        log_noise_sd = par[["log_noise"]]
+        log_noise_sd = par[["log_noise"]],
+        noise_scale = noise_scale
       )
     } else if (beta_mode == "prior_flat") {
       noise_sd <- exp(par[["log_noise"]])
+      s_eff <- .exact_matern_unknown_noise_s(noise_sd, length(x), noise_scale)
       stats <- .exact_matern_sufficient_stats(
         x = as.numeric(x),
-        s = rep(noise_sd, length(x)),
+        s = s_eff,
         A = A,
         spde_template = spde_template,
         alpha = alpha,
@@ -4040,14 +5211,16 @@ matern_objective_breakdown <- function(fit,
         log_range = par[["log_range"]],
         log_sigma = par[["log_sigma"]]
       )
-      list(
+      objective <- list(
         log_marginal = .exact_matern_loglik_integrated_flat_beta(stats, n_obs = length(x)),
         fitted_beta = stats$beta_profile_hat,
         fitted_noise_sd = noise_sd,
-        s = rep(noise_sd, length(x)),
+        s = s_eff,
         stats = stats,
         beta_prec = 0
       )
+      if (!is.null(noise_scale)) objective$noise_scale <- as.numeric(noise_scale)
+      objective
     } else {
       .exact_matern_prior_objective_unknown_noise(
         x = as.numeric(x),
@@ -4058,7 +5231,8 @@ matern_objective_breakdown <- function(fit,
         log_range = par[["log_range"]],
         log_sigma = par[["log_sigma"]],
         beta_prec = beta_prec,
-        log_noise_sd = par[["log_noise"]]
+        log_noise_sd = par[["log_noise"]],
+        noise_scale = noise_scale
       )
     }
   }
@@ -4098,6 +5272,8 @@ matern_objective_breakdown <- function(fit,
     beta_prec = beta_prec
   )
   state$fitted_noise_sd <- objective_opt$fitted_noise_sd
+  state$fitted_s <- as.numeric(objective_opt$s)
+  if (!is.null(noise_scale)) state$noise_scale <- as.numeric(noise_scale)
 
   log_likelihood <- state$log_marginal
   class(log_likelihood) <- "logLik"
@@ -4139,6 +5315,7 @@ matern_objective_breakdown <- function(fit,
     fitted_g = state$fitted_g,
     fitted_beta = state$fitted_beta,
     fitted_noise_sd = state$fitted_noise_sd,
+    fitted_s = state$fitted_s,
     beta_prec = beta_prec,
     beta_mode = beta_mode,
     log_likelihood = log_likelihood,
@@ -4150,6 +5327,8 @@ matern_objective_breakdown <- function(fit,
     prior_family = if (is.null(pc_penalty)) "identity_Matern_learned_noise" else "identity_Matern_pc_exact_learned_noise",
     pc_penalty = pc_penalty,
     log_likelihood_pc_prior_theta = objective_opt$log_pc_prior_theta,
+    noise_scale = if (is.null(noise_scale)) NULL else as.numeric(noise_scale),
+    exact_optimization = .matern_exact_optimization_diagnostics(opt_res),
     matern_objective_context = list(
       A = A,
       spde_template = spde_template,
@@ -4248,7 +5427,8 @@ matern_objective_breakdown <- function(fit,
                                                             beta_fixed = NULL,
                                                             beta_prec = NULL,
                                                             pc_penalty = NULL,
-                                                            suppress_warnings = TRUE) {
+                                                            suppress_warnings = TRUE,
+                                                            noise_scale = NULL) {
   raw_eval <- function() {
     if (beta_mode == "empirical_bayes") {
       .exact_matern_profile_objective_unknown_noise(
@@ -4259,7 +5439,8 @@ matern_objective_breakdown <- function(fit,
         d = d,
         log_range = log_range,
         log_sigma = log_sigma,
-        log_noise_sd = log_noise_sd
+        log_noise_sd = log_noise_sd,
+        noise_scale = noise_scale
       )
     } else if (beta_mode == "fixed") {
       .exact_matern_fixed_objective_unknown_noise(
@@ -4271,13 +5452,15 @@ matern_objective_breakdown <- function(fit,
         log_range = log_range,
         log_sigma = log_sigma,
         beta0 = beta_fixed,
-        log_noise_sd = log_noise_sd
+        log_noise_sd = log_noise_sd,
+        noise_scale = noise_scale
       )
     } else if (beta_mode == "prior_flat") {
       noise_sd <- exp(log_noise_sd)
+      s_eff <- .exact_matern_unknown_noise_s(noise_sd, length(x), noise_scale)
       stats <- .exact_matern_sufficient_stats(
         x = as.numeric(x),
-        s = rep(noise_sd, length(x)),
+        s = s_eff,
         A = A,
         spde_template = spde_template,
         alpha = alpha,
@@ -4285,14 +5468,16 @@ matern_objective_breakdown <- function(fit,
         log_range = log_range,
         log_sigma = log_sigma
       )
-      list(
+      objective <- list(
         log_marginal = .exact_matern_loglik_integrated_flat_beta(stats, n_obs = length(x)),
         fitted_beta = stats$beta_profile_hat,
         fitted_noise_sd = noise_sd,
-        s = rep(noise_sd, length(x)),
+        s = s_eff,
         stats = stats,
         beta_prec = 0
       )
+      if (!is.null(noise_scale)) objective$noise_scale <- as.numeric(noise_scale)
+      objective
     } else if (beta_mode == "prior_proper") {
       .exact_matern_prior_objective_unknown_noise(
         x = as.numeric(x),
@@ -4303,7 +5488,8 @@ matern_objective_breakdown <- function(fit,
         log_range = log_range,
         log_sigma = log_sigma,
         beta_prec = beta_prec,
-        log_noise_sd = log_noise_sd
+        log_noise_sd = log_noise_sd,
+        noise_scale = noise_scale
       )
     } else {
       stop("Unsupported beta mode: ", beta_mode)
@@ -4561,21 +5747,29 @@ Matern <- function(theta = NULL, sigma = 1, beta = NULL, beta_prec = NULL) {
 #' that exact objective evaluated at the INLA mode, with INLA's native Step A
 #' quantities retained as diagnostics.
 #'
-#' For log-link fits, \code{backend = "auto"} uses \code{"laplace_fisher"}.
-#' For softplus-link fits, it uses \code{"laplace"}. Fisher curvature keeps the
-#' conditional mode equal to the mode of the original log posterior and replaces
-#' only the Laplace posterior precision/log-determinant observation curvature by
-#' the Fisher/Gauss-Newton curvature. For log-link normal observations this
-#' replaces \eqn{\exp(\eta_i)(2\exp(\eta_i)-x_i)/s_i^2} by
+#' For log-link and softplus-link fits, \code{backend = "auto"} uses
+#' \code{"fisher_pql"}. Fisher-PQL builds repeated pseudo-Gaussian exact Matern
+#' Step A fits and uses three internal pseudo-response updates by default. It
+#' reports a Fisher/Laplace score evaluated at the final PQL mode; this is an
+#' approximate PQL-mode score, not a true re-optimized original-model Laplace
+#' marginal likelihood. Explicit \code{backend = "laplace"} and
+#' \code{"laplace_tmb"} retain observed-Hessian Laplace semantics through the
+#' package-owned TMB implementation. Explicit \code{backend = "laplace_fisher"}
+#' keeps the conditional mode equal to the mode of the original log posterior
+#' and replaces only the Laplace posterior precision/log-determinant observation
+#' curvature by the Fisher/Gauss-Newton curvature. For log-link normal
+#' observations this replaces
+#' \eqn{\exp(\eta_i)(2\exp(\eta_i)-x_i)/s_i^2} by
 #' \eqn{\exp(2\eta_i)/s_i^2}; softplus uses the analogous squared first
-#' derivative curvature. Explicit \code{backend = "laplace"},
-#' and \code{"laplace_tmb"} retain observed-Hessian Laplace semantics through
-#' the package-owned TMB implementation. Fisher fits report
+#' derivative curvature. Fisher-Laplace fits report
 #' \code{backend = "laplace_fisher"}, \code{laplace_curvature = "fisher"}, and
 #' \code{log_likelihood_semantics = "laplace_fisher_<beta_mode>"}.
 #' INLA-backed log-link fits report the observed-Hessian Laplace objective
 #' evaluated at the INLA mode, with INLA's native marginal likelihood
 #' quantities retained as diagnostics.
+#' Inlabru-backed softplus fits likewise report the package observed-Hessian
+#' Laplace objective evaluated at the inlabru fitted hyperparameters, with
+#' inlabru's native marginal likelihood retained as a diagnostic.
 #'
 #' For non-identity links, posterior moments are reported on the response scale.
 #' The log link uses exact log-normal moment formulas under the marginal
@@ -4610,17 +5804,31 @@ Matern <- function(theta = NULL, sigma = 1, beta = NULL, beta_prec = NULL) {
 #'   mode as their primary \code{log_likelihood}; log-link INLA fits store the
 #'   package Laplace objective at the INLA mode.
 #' @param backend Backend choice. \code{"auto"} uses \code{"exact"} for the
-#'   identity link, \code{"laplace_fisher"} for the log link, and
-#'   \code{"laplace"} for the softplus link. \code{"laplace_fisher"} is
-#'   available for \code{link = "log"} and \code{link = "softplus"}.
+#'   identity link and \code{"fisher_pql"} for the log and softplus links.
+#'   \code{"laplace_fisher"} and \code{"fisher_pql"} are available for
+#'   \code{link = "log"} and \code{link = "softplus"}.
 #'   \code{"laplace"} uses the observed-Hessian TMB implementation and errors
 #'   if that TMB fit is unavailable or invalid. \code{"laplace_fisher"} uses the same TMB mode and
 #'   hyperparameter fit when supported, but builds the returned posterior
 #'   approximation and Fisher Laplace score with Fisher/Gauss-Newton curvature.
+#'   \code{"fisher_pql"} is an approximate pseudo-likelihood backend that uses
+#'   three Fisher/PQL pseudo-Gaussian exact Matern Step A updates by default. It
+#'   reports a Fisher/Laplace score evaluated at the final PQL mode; this is an
+#'   approximate PQL-mode score, not a true re-optimized original-model Laplace
+#'   marginal likelihood.
 #'   The R reference backend \code{"laplace_r"} is accepted for internal
 #'   validation only and is never reached automatically from public backends.
 #'   \code{"inla"} is the independent INLA implementation and uses the supplied
 #'   \code{pc.penalty}, if any, as the source of PC-prior penalization.
+#'   \code{"inlabru"} runs the SPDE model through \code{inlabru}'s
+#'   iterative-linearised INLA method and is currently only supported for
+#'   \code{link = "softplus"}; it provides an opt-in alternative to the
+#'   default Laplace path for cross-validation and benchmarking, not an expected
+#'   acceleration path. For known-noise fits, \code{pc.penalty = NULL} keeps the
+#'   non-PC SPDE parameterisation so the prior semantics match the manual
+#'   Laplace default. For learned-noise fits with \code{s = NULL},
+#'   \code{"inlabru"} requires an explicit \code{pc.penalty} list with
+#'   \code{range}, \code{sigma}, and \code{noise} entries.
 #'   Compatibility aliases \code{"laplace_tmb"} and \code{"inla_pc"} are still
 #'   accepted.
 #' @param link Link function. \code{"identity"} fits unconstrained Gaussian
@@ -4652,7 +5860,7 @@ ebnm_Matern_generator <- function(locations = NULL,
                                   penalty_range = NULL,
                                   pc.penalty = NULL,
                                   compute_exact_diagnostic = FALSE,
-                                  backend = c("auto", "exact", "laplace", "laplace_fisher", "inla"),
+                                  backend = c("auto", "exact", "laplace", "laplace_fisher", "fisher_pql", "inla", "inlabru"),
                                   link = c("identity", "log", "softplus", "logit", "probit")) {
 
   backend <- .match_matern_backend_arg(backend)
@@ -4843,6 +6051,33 @@ ebnm_Matern_generator <- function(locations = NULL,
       )
     }
 
+    if (identical(backend_use, "fisher_pql")) {
+      fit <- .fit_matern_fisher_pql_known_noise(
+        x = x,
+        s = s,
+        A = A,
+        spde_template = spde_template,
+        alpha = alpha,
+        d = d,
+        theta_init = theta_init,
+        sigma_init = sigma_init,
+        beta_init = resolved_init$beta_init,
+        beta_mode = beta_mode,
+        beta_fixed = beta0_fixed,
+        beta_prec = beta_prec_use,
+        pc_penalty = pc_penalty0,
+        link = link,
+        suppress_warnings = suppress_warnings,
+        fix_g = fix_g,
+        fix_params = fix_params_use
+      )
+      fit$data <- data.frame(x = x, s = s)
+      fit$mesh <- mesh
+      fit$inla_result <- NULL
+      fit$g_init <- g_init_resolved
+      return(structure(fit, class = c("list", "ebnm")))
+    }
+
     if (backend_use %in% c("laplace", "laplace_fisher", "laplace_r", "laplace_tmb")) {
       fit <- .fit_matern_laplace_dispatch_known_noise(
         x = x,
@@ -4869,6 +6104,106 @@ ebnm_Matern_generator <- function(locations = NULL,
       fit$inla_result <- NULL
       fit$g_init <- g_init_resolved
       return(structure(fit, class = c("list", "ebnm")))
+    }
+
+    if (identical(backend_use, "inlabru")) {
+      if (any(c("range", "sigma") %in% fix_params_use)) {
+        stop("`fix_params` values `range` and `sigma` are not supported with the inlabru Matern backend.")
+      }
+      pc_penalty_inlabru <- .matern_inlabru_pc_penalty_policy(
+        pc_penalty_arg = pc.penalty,
+        resolved_pc_penalty = pc_penalty0,
+        learn_noise = FALSE
+      )
+      theta_init_inlabru <- .matern_inla_theta_init(
+        log_range = theta_init,
+        log_sigma = log(sigma_init),
+        alpha = alpha,
+        d = d,
+        pc_penalty = pc_penalty_inlabru
+      )
+      ibru_fit <- if (identical(beta_mode, "fixed")) {
+        .fit_matern_inlabru_stepA_fixed_beta(
+          x = as.numeric(x),
+          s = as.numeric(s),
+          A = A,
+          mesh = mesh,
+          alpha = alpha,
+          d = d,
+          locations = loc_mat,
+          theta_init = theta_init_inlabru,
+          beta_fixed = beta0_fixed,
+          pc_penalty = pc_penalty_inlabru,
+          link = link,
+          suppress_warnings = suppress_warnings
+        )
+      } else {
+        .fit_matern_inlabru_stepA(
+          x = as.numeric(x),
+          s = as.numeric(s),
+          A = A,
+          mesh = mesh,
+          alpha = alpha,
+          d = d,
+          locations = loc_mat,
+          theta_init = theta_init_inlabru,
+          beta_init = resolved_init$beta_init,
+          beta_prec = if (identical(beta_mode, "prior_proper")) beta_prec_use else 0,
+          pc_penalty = pc_penalty_inlabru,
+          link = link,
+          suppress_warnings = suppress_warnings
+        )
+      }
+
+      comparable_objective <- .matern_inlabru_known_laplace_objective(
+        fit = ibru_fit,
+        x = as.numeric(x),
+        s = as.numeric(s),
+        A = A,
+        spde_template = spde_template,
+        alpha = alpha,
+        d = d,
+        beta_mode = beta_mode,
+        beta_fixed = beta0_fixed,
+        beta_prec = if (identical(beta_mode, "prior_flat")) 0 else beta_prec_use,
+        link = link,
+        pc_penalty = pc_penalty_inlabru,
+        suppress_warnings = suppress_warnings
+      )
+      log_likelihood <- as.numeric(comparable_objective$log_marginal)
+      class(log_likelihood) <- "logLik"
+
+      out <- list(
+        posterior = ibru_fit$posterior,
+        fitted_g = ibru_fit$fitted_g,
+        fitted_beta = ibru_fit$fitted_beta,
+        beta_prec = if (identical(beta_mode, "prior_flat")) 0 else beta_prec_use,
+        beta_mode = beta_mode,
+        g_init = g_init_resolved,
+        log_likelihood = log_likelihood,
+        log_likelihood_semantics = paste0("laplace_at_inlabru_params_", beta_mode),
+        posterior_sampler = function(nsamp) .posterior_sampler_unavailable(nsamp, length(x)),
+        data = data.frame(x = x, s = s),
+        prior_family = paste0(link, "_Matern_inlabru"),
+        posterior_spatial_field = ibru_fit$posterior_spatial_field,
+        mesh = mesh,
+        inla_result = ibru_fit$result,
+        backend = "inlabru",
+        link = link,
+        pc_penalty = pc_penalty_inlabru,
+        log_likelihood_laplace_at_inlabru_params = as.numeric(comparable_objective$log_marginal),
+        log_likelihood_inlabru_mlik_integration = ibru_fit$log_likelihood_inlabru_mlik_integration,
+        log_likelihood_stepA_mlik_integration = ibru_fit$log_likelihood_stepA_mlik_integration,
+        beta_profile_optimization = ibru_fit$beta_profile_optimization,
+        beta_profile_objective = ibru_fit$beta_profile_objective,
+        matern_objective_context = list(
+          A = A,
+          spde_template = spde_template,
+          alpha = alpha,
+          d = d
+        )
+      )
+      return(structure(out, class = c("list", "ebnm")))
     }
 
     if (backend_use == "exact") {

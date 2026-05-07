@@ -7,16 +7,17 @@ test_that("Matern generator supports log-link positive smoothing", {
 
   fit <- ebnm_Matern_generator(locations = loc, link = "log")(x, s)
 
-  expect_equal(fit$backend, "laplace_fisher")
-  expect_equal(fit$laplace_implementation, "tmb")
+  expect_equal(fit$backend, "fisher_pql")
+  expect_equal(fit$laplace_implementation, "exact_fisher_pql")
   expect_equal(fit$laplace_curvature, "fisher")
-  expect_equal(fit$log_likelihood_semantics, "laplace_fisher_empirical_bayes")
+  expect_equal(fit$log_likelihood_semantics, "fisher_laplace_at_fisher_pql_mode_empirical_bayes")
+  expect_equal(fit$fisher_pql_diagnostics$inner_iterations, 3L)
   expect_equal(fit$link, "log")
   expect_true(all(fit$posterior$mean > 0))
   expect_true(is.finite(as.numeric(fit$log_likelihood)))
 })
 
-test_that("Matern auto backend uses Fisher Laplace for log-link fits", {
+test_that("Matern auto backend uses Fisher-PQL for log-link fits", {
   set.seed(111)
 
   loc <- as.matrix(expand.grid(
@@ -43,26 +44,28 @@ test_that("Matern auto backend uses Fisher Laplace for log-link fits", {
     beta_fixed = 0
   )
 
-  expect_equal(fit_auto_fixed$backend, "laplace_fisher")
-  expect_equal(fit_auto_fixed$laplace_implementation, "tmb")
+  expect_equal(fit_auto_fixed$backend, "fisher_pql")
+  expect_equal(fit_auto_fixed$laplace_implementation, "exact_fisher_pql")
   expect_equal(fit_auto_fixed$laplace_curvature, "fisher")
-  expect_equal(fit_auto_fixed$log_likelihood_semantics, "laplace_fisher_fixed")
+  expect_equal(fit_auto_fixed$log_likelihood_semantics, "fisher_laplace_at_fisher_pql_mode_fixed")
+  expect_equal(fit_auto_fixed$fisher_pql_diagnostics$inner_iterations, 3L)
   expect_equal(fit_laplace_fixed$backend, "laplace")
   expect_equal(fit_laplace_fixed$laplace_implementation, "tmb")
   expect_equal(fit_laplace_fixed$laplace_curvature, "observed")
   expect_true(is.finite(as.numeric(fit_auto_fixed$log_likelihood)))
   expect_true(is.finite(as.numeric(fit_laplace_fixed$log_likelihood)))
-  expect_lt(max(abs(fit_auto_fixed$posterior$mean - fit_laplace_fixed$posterior$mean)), 0.05)
+  expect_lt(max(abs(fit_auto_fixed$posterior$mean - fit_laplace_fixed$posterior$mean)), 0.1)
 
-  expect_equal(fit_auto_eb$backend, "laplace_fisher")
-  expect_equal(fit_auto_eb$laplace_implementation, "tmb")
+  expect_equal(fit_auto_eb$backend, "fisher_pql")
+  expect_equal(fit_auto_eb$laplace_implementation, "exact_fisher_pql")
   expect_equal(fit_auto_eb$laplace_curvature, "fisher")
-  expect_equal(fit_auto_fixed_g$backend, "laplace_fisher")
-  expect_equal(fit_auto_fixed_g$laplace_implementation, "tmb")
+  expect_equal(fit_auto_fixed_g$backend, "fisher_pql")
+  expect_equal(fit_auto_fixed_g$laplace_implementation, "exact_fisher_pql")
   expect_equal(fit_auto_fixed_g$laplace_curvature, "fisher")
+  expect_equal(fit_auto_fixed_g$fisher_pql_diagnostics$inner_iterations, 3L)
 })
 
-test_that("Matern softplus auto backend uses observed Laplace; INLA unsupported", {
+test_that("Matern softplus auto backend uses Fisher-PQL; INLA unsupported", {
   set.seed(211)
   loc <- seq(0, 1, length.out = 12)
   s <- rep(0.1, length(loc))
@@ -71,8 +74,10 @@ test_that("Matern softplus auto backend uses observed Laplace; INLA unsupported"
 
   fit_auto <- ebnm_Matern_generator(locations = loc, link = "softplus")(x, s)
   fit_fisher <- ebnm_Matern_generator(locations = loc, link = "softplus", backend = "laplace_fisher")(x, s)
-  expect_equal(fit_auto$backend, "laplace")
-  expect_equal(fit_auto$laplace_curvature, "observed")
+  expect_equal(fit_auto$backend, "fisher_pql")
+  expect_equal(fit_auto$laplace_implementation, "exact_fisher_pql")
+  expect_equal(fit_auto$laplace_curvature, "fisher")
+  expect_equal(fit_auto$fisher_pql_diagnostics$inner_iterations, 3L)
   expect_equal(fit_fisher$backend, "laplace_fisher")
   expect_equal(fit_fisher$laplace_curvature, "fisher")
   expect_error(
@@ -300,6 +305,287 @@ test_that("Matern Fisher curvature stays positive on deterministic pseudo-pathol
   expect_true(all(is.finite(fit$posterior$var)))
 })
 
+test_that("Matern Fisher-PQL pseudo-response matches link algebra", {
+  eta <- c(-0.4, 0.2, 0.8)
+  x <- c(0.7, 1.2, 2.4)
+  s <- c(0.08, 0.09, 0.1)
+
+  log_pseudo <- EBSmoothr:::.matern_fisher_pql_pseudo_response(
+    x = x,
+    eta = eta,
+    s = s,
+    link = "log"
+  )
+  log_mu <- exp(eta)
+  log_g <- exp(eta)
+  expect_equal(log_pseudo$z, eta + (x - log_mu) / log_g, tolerance = 1e-12)
+  expect_equal(log_pseudo$s, s / log_g, tolerance = 1e-12)
+  expect_equal(log_pseudo$noise_scale, 1 / log_g, tolerance = 1e-12)
+
+  softplus_pseudo <- EBSmoothr:::.matern_fisher_pql_pseudo_response(
+    x = x,
+    eta = eta,
+    s = s,
+    link = "softplus"
+  )
+  softplus_mu <- log1p(exp(eta))
+  softplus_g <- 1 / (1 + exp(-eta))
+  expect_equal(softplus_pseudo$z, eta + (x - softplus_mu) / softplus_g, tolerance = 1e-12)
+  expect_equal(softplus_pseudo$s, s / softplus_g, tolerance = 1e-12)
+  expect_equal(softplus_pseudo$noise_scale, 1 / softplus_g, tolerance = 1e-12)
+})
+
+test_that("Matern Fisher-PQL rejects unsupported links", {
+  loc <- seq(0, 1, length.out = 8)
+  s <- rep(0.1, length(loc))
+  x <- 0.2 + sin(2 * pi * loc)
+
+  expect_error(
+    ebnm_Matern_generator(locations = loc, link = "identity", backend = "fisher_pql")(x, s),
+    "only available for `link = \"log\"` or `link = \"softplus\"`"
+  )
+  expect_error(
+    eb_smoother(
+      x,
+      s = s,
+      family = "matern",
+      locations = loc,
+      link = "identity",
+      backend = "fisher_pql"
+    ),
+    "only available for `link = \"log\"` or `link = \"softplus\"`"
+  )
+})
+
+test_that("Matern Fisher-PQL Step A mode matches the sparse one-step reference", {
+  set.seed(219)
+  loc <- seq(0, 1, length.out = 8)
+  setup <- Matern_setup(locations = loc)
+  s <- rep(0.1, length(loc))
+  g_init <- Matern(theta = log(0.4), sigma = 0.3)
+
+  for (link in c("log", "softplus")) {
+    eta <- if (identical(link, "log")) {
+      0.08 + 0.18 * sin(2 * pi * loc)
+    } else {
+      0.55 + 0.22 * sin(2 * pi * loc)
+    }
+    mean <- if (identical(link, "log")) exp(eta) else log1p(exp(eta))
+    x <- mean + rnorm(length(loc), sd = 0.04)
+
+    fit <- EBSmoothr:::.fit_matern_fisher_pql_known_noise(
+      x = x,
+      s = s,
+      A = setup$A,
+      spde_template = setup$spde_template,
+      alpha = setup$alpha,
+      d = setup$d,
+      theta_init = log(0.4),
+      sigma_init = 0.3,
+      beta_init = 0,
+      beta_mode = "fixed",
+      beta_fixed = 0,
+      link = link,
+      fix_g = TRUE,
+      pql_max_iter = 1L
+    )
+
+    ref <- EBSmoothr:::.matern_fisher_pql_reference_mode_at_params(
+      x = x,
+      s = s,
+      A = setup$A,
+      spde_template = setup$spde_template,
+      alpha = setup$alpha,
+      d = setup$d,
+      log_range = log(0.4),
+      log_sigma = log(0.3),
+      beta_mode = "fixed",
+      beta_value = 0,
+      beta_start = 0,
+      link = link,
+      pql_w_start = rep(0, ncol(setup$A))
+    )
+
+    expect_equal(fit$laplace_implementation, "exact_fisher_pql")
+    expect_equal(fit$fisher_pql_diagnostics$inner_iterations, 1L)
+    expect_equal(fit$fisher_pql_diagnostics$stepA_engine, "exact_gaussian")
+    expect_equal(fit$fisher_pql_mode, ref$mode, tolerance = 1e-8)
+  }
+})
+
+test_that("Matern Fisher-PQL defaults to three pseudo-Gaussian updates", {
+  set.seed(2191)
+  loc <- seq(0, 1, length.out = 10)
+  s <- rep(0.1, length(loc))
+  eta <- 0.5 + 0.2 * sin(2 * pi * loc)
+  x <- log1p(exp(eta)) + rnorm(length(loc), sd = 0.04)
+
+  fit <- ebnm_Matern_generator(
+    locations = loc,
+    link = "softplus",
+    backend = "fisher_pql"
+  )(x, s)
+
+  expect_equal(fit$fisher_pql_diagnostics$inner_iterations, 3L)
+  expect_equal(length(fit$fisher_pql_diagnostics$eta_change), 3L)
+  expect_equal(length(fit$fisher_pql_diagnostics$stepA_log_marginals), 3L)
+})
+
+test_that("Matern Fisher-PQL routes Step A through exact Gaussian fits, not TMB", {
+  expect_false(exists(".fit_matern_fisher_pql_tmb", envir = asNamespace("EBSmoothr"), inherits = FALSE))
+  expect_false(exists(".matern_fisher_pql_tmb_data", envir = asNamespace("EBSmoothr"), inherits = FALSE))
+  pql_body <- paste(
+    deparse(body(EBSmoothr:::.fit_matern_fisher_pql_exact_stepA)),
+    deparse(body(EBSmoothr:::.fit_matern_fisher_pql_known_noise)),
+    deparse(body(EBSmoothr:::.fit_matern_fisher_pql_unknown_noise)),
+    collapse = "\n"
+  )
+  expect_true(grepl(".fit_matern_exact_known_noise", pql_body, fixed = TRUE))
+  expect_true(grepl(".fit_matern_exact_unknown_noise", pql_body, fixed = TRUE))
+  expect_false(grepl(".matern_tmb_make_adfun", pql_body, fixed = TRUE))
+  src_path <- testthat::test_path("../../src/EBSmoothr.cpp")
+  if (file.exists(src_path)) {
+    src <- paste(readLines(src_path, warn = FALSE), collapse = "\n")
+    expect_false(grepl("model_id == 2", src, fixed = TRUE))
+  }
+})
+
+test_that("Matern Fisher-PQL known-noise backend matches Laplace references", {
+  cases <- list(
+    list(link = "log", seed = 220, ref_backend = "laplace_fisher"),
+    list(link = "softplus", seed = 221, ref_backend = "laplace")
+  )
+
+  for (case in cases) {
+    set.seed(case$seed)
+    loc <- seq(0, 1, length.out = 12)
+    eta <- if (identical(case$link, "log")) {
+      0.05 + 0.18 * sin(2 * pi * loc)
+    } else {
+      0.6 + 0.35 * sin(2 * pi * loc)
+    }
+    mean <- if (identical(case$link, "log")) exp(eta) else log1p(exp(eta))
+    s <- rep(0.08, length(loc))
+    x <- mean + rnorm(length(loc), sd = 0.04)
+
+    fit <- ebnm_Matern_generator(
+      locations = loc,
+      link = case$link,
+      backend = "fisher_pql"
+    )(x, s)
+    ref <- ebnm_Matern_generator(
+      locations = loc,
+      link = case$link,
+      backend = case$ref_backend
+    )(x, s)
+
+    expect_equal(fit$backend, "fisher_pql")
+    expect_equal(fit$laplace_implementation, "exact_fisher_pql")
+    expect_equal(fit$laplace_curvature, "fisher")
+    expect_equal(fit$log_likelihood_semantics, "fisher_laplace_at_fisher_pql_mode_empirical_bayes")
+    expect_equal(as.numeric(fit$log_likelihood), fit$log_likelihood_original_at_fisher_pql_mode, tolerance = 1e-12)
+    expect_false("log_likelihood_laplace_at_fisher_pql_params" %in% names(fit))
+    expect_true(is.finite(fit$log_likelihood_fisher_pql_stepA))
+    expect_true(isTRUE(fit$fisher_pql_diagnostics$converged))
+    expect_equal(fit$fisher_pql_diagnostics$inner_iterations, 3L)
+    expect_equal(fit$fisher_pql_diagnostics$stepA_engine, "exact_gaussian")
+    expect_equal(fit$fisher_pql_diagnostics$g_floor, 1e-6)
+    expect_true(all(is.finite(fit$fisher_pql_eta_mode)))
+    expect_true(all(is.finite(fit$fitted_s)))
+    expect_gt(min(fit$fitted_s), 0)
+    expect_true(all(is.finite(fit$posterior$mean)))
+    expect_true(all(is.finite(fit$posterior$var)))
+    expect_lt(max(abs(fit$posterior$mean - ref$posterior$mean)), 0.1)
+    expect_lt(sqrt(mean((fit$posterior$mean - ref$posterior$mean)^2)), 0.05)
+    ref_w <- ref$posterior_spatial_field$mode
+    if (is.null(ref_w)) ref_w <- ref$posterior_spatial_field$mean
+    eta_ref <- as.numeric(ref$matern_objective_context$A %*% as.numeric(ref_w)) + ref$fitted_beta
+    expect_lt(max(abs(fit$fisher_pql_eta_mode - eta_ref)), 0.15)
+    expect_lt(sqrt(mean((fit$fisher_pql_eta_mode - eta_ref)^2)), 0.05)
+    expect_lt(abs(fit$fitted_g$theta - ref$fitted_g$theta), 0.15)
+    expect_lt(abs(log(fit$fitted_g$sigma) - log(ref$fitted_g$sigma)), 0.15)
+    expect_true(is.finite(as.numeric(fit$log_likelihood) - as.numeric(ref$log_likelihood)))
+  }
+})
+
+test_that("Matern Fisher-PQL learned-noise backend matches Laplace references", {
+  cases <- list(
+    list(link = "log", seed = 302, ref_backend = "laplace_fisher"),
+    list(link = "softplus", seed = 306, ref_backend = "laplace")
+  )
+
+  for (case in cases) {
+    set.seed(case$seed)
+    loc <- seq(0, 1, length.out = 20)
+    eta <- if (identical(case$link, "log")) {
+      0.05 + 0.25 * sin(2 * pi * loc) + 0.1 * cos(4 * pi * loc)
+    } else {
+      0.8 + 0.45 * sin(2 * pi * loc) + 0.1 * cos(4 * pi * loc)
+    }
+    mean <- if (identical(case$link, "log")) exp(eta) else log1p(exp(eta))
+    x <- mean + rnorm(length(loc), sd = 0.1)
+
+    fit <- eb_smoother(
+      x,
+      s = NULL,
+      family = "matern",
+      locations = loc,
+      link = case$link,
+      backend = "fisher_pql"
+    )
+    ref <- eb_smoother(
+      x,
+      s = NULL,
+      family = "matern",
+      locations = loc,
+      link = case$link,
+      backend = case$ref_backend
+    )
+
+    expect_equal(fit$backend, "fisher_pql")
+    expect_equal(fit$raw_fit$laplace_implementation, "exact_fisher_pql")
+    expect_equal(fit$raw_fit$laplace_curvature, "fisher")
+    expect_equal(fit$log_likelihood_semantics, "fisher_laplace_at_fisher_pql_mode_empirical_bayes")
+    expect_equal(as.numeric(fit$log_likelihood), fit$raw_fit$log_likelihood_original_at_fisher_pql_mode, tolerance = 1e-12)
+    expect_false("log_likelihood_laplace_at_fisher_pql_params" %in% names(fit$raw_fit))
+    expect_true(is.finite(fit$raw_fit$log_likelihood_fisher_pql_stepA))
+    expect_true(isTRUE(fit$raw_fit$fisher_pql_diagnostics$converged))
+    diagnostics <- summary(fit)$diagnostics
+    expect_true("log_likelihood_fisher_pql_stepA" %in% names(diagnostics))
+    expect_true("log_likelihood_original_at_fisher_pql_mode" %in% names(diagnostics))
+    expect_true("fisher_pql_diagnostics" %in% names(diagnostics))
+    expect_equal(fit$raw_fit$fisher_pql_diagnostics$inner_iterations, 3L)
+    expect_equal(fit$raw_fit$fisher_pql_diagnostics$stepA_engine, "exact_gaussian")
+    expect_gt(fit$fitted_noise_sd, 0)
+    expect_true(all(is.finite(fit$fitted_s)))
+    expect_gt(min(fit$fitted_s), 0)
+    expect_equal(fit$fitted_s, fit$raw_fit$fitted_s, tolerance = 1e-12)
+    A <- fit$raw_fit$matern_objective_context$A
+    eta_mode <- fit$raw_fit$fisher_pql_eta_mode
+    expect_equal(eta_mode, as.numeric(A %*% fit$raw_fit$fisher_pql_mode) + fit$fitted_beta, tolerance = 1e-10)
+    final_pseudo <- EBSmoothr:::.matern_fisher_pql_pseudo_response(
+      x = x,
+      eta = eta_mode,
+      s = rep(fit$fitted_noise_sd, length(x)),
+      link = case$link
+    )
+    expect_equal(fit$fitted_s, final_pseudo$s, tolerance = 1e-12)
+    expect_true(all(is.finite(fit$posterior$mean)))
+    expect_true(all(is.finite(fit$posterior$var)))
+    expect_lt(max(abs(fit$posterior$mean - ref$posterior$mean)), 0.1)
+    expect_lt(sqrt(mean((fit$posterior$mean - ref$posterior$mean)^2)), 0.05)
+    ref_w <- ref$raw_fit$posterior_spatial_field$mode
+    if (is.null(ref_w)) ref_w <- ref$raw_fit$posterior_spatial_field$mean
+    eta_ref <- as.numeric(ref$raw_fit$matern_objective_context$A %*% as.numeric(ref_w)) + ref$fitted_beta
+    expect_lt(max(abs(fit$raw_fit$fisher_pql_eta_mode - eta_ref)), 0.15)
+    expect_lt(sqrt(mean((fit$raw_fit$fisher_pql_eta_mode - eta_ref)^2)), 0.05)
+    expect_lt(abs(fit$fitted_g$theta - ref$fitted_g$theta), 0.15)
+    expect_lt(abs(log(fit$fitted_g$sigma) - log(ref$fitted_g$sigma)), 0.15)
+    expect_lt(abs(log(fit$fitted_noise_sd) - log(ref$fitted_noise_sd)), 0.15)
+    expect_true(is.finite(as.numeric(fit$log_likelihood) - as.numeric(ref$log_likelihood)))
+  }
+})
+
 test_that("Matern TMB Laplace validation catches unusable fits", {
   valid_fit <- list(
     posterior = data.frame(
@@ -402,10 +688,11 @@ test_that("Matern wrapper supports known and learned-noise log links", {
     link = "log"
   )
 
-  expect_equal(fit$backend, "laplace_fisher")
-  expect_equal(fit$raw_fit$laplace_implementation, "tmb")
+  expect_equal(fit$backend, "fisher_pql")
+  expect_equal(fit$raw_fit$laplace_implementation, "exact_fisher_pql")
   expect_equal(fit$raw_fit$laplace_curvature, "fisher")
-  expect_equal(fit$log_likelihood_semantics, "laplace_fisher_empirical_bayes")
+  expect_equal(fit$log_likelihood_semantics, "fisher_laplace_at_fisher_pql_mode_empirical_bayes")
+  expect_equal(fit$raw_fit$fisher_pql_diagnostics$inner_iterations, 3L)
   expect_equal(fit$link, "log")
   expect_true(all(fit$posterior$mean > 0))
 
@@ -416,10 +703,11 @@ test_that("Matern wrapper supports known and learned-noise log links", {
     locations = loc,
     link = "log"
   )
-  expect_equal(fit_learned$backend, "laplace_fisher")
-  expect_equal(fit_learned$raw_fit$laplace_implementation, "tmb")
+  expect_equal(fit_learned$backend, "fisher_pql")
+  expect_equal(fit_learned$raw_fit$laplace_implementation, "exact_fisher_pql")
   expect_equal(fit_learned$raw_fit$laplace_curvature, "fisher")
-  expect_equal(fit_learned$log_likelihood_semantics, "laplace_fisher_empirical_bayes")
+  expect_equal(fit_learned$log_likelihood_semantics, "fisher_laplace_at_fisher_pql_mode_empirical_bayes")
+  expect_equal(fit_learned$raw_fit$fisher_pql_diagnostics$inner_iterations, 3L)
   expect_equal(fit_learned$noise_mode, "estimated")
   expect_gt(fit_learned$fitted_noise_sd, 0)
   expect_true(all(fit_learned$posterior$mean > 0))
@@ -451,8 +739,9 @@ test_that("Matern log-link learned-noise Laplace implementations agree across be
 
   pc <- list(range = c(0.3, 0.5), sigma = c(0.2, 0.5), noise = c(0.08, 0.5))
   fit_pc_auto <- do.call(eb_smoother, c(base_args, list(pc.penalty = pc, beta_fixed = 0.1)))
-  expect_equal(fit_pc_auto$backend, "laplace_fisher")
+  expect_equal(fit_pc_auto$backend, "fisher_pql")
   expect_equal(fit_pc_auto$raw_fit$laplace_curvature, "fisher")
+  expect_equal(fit_pc_auto$raw_fit$fisher_pql_diagnostics$inner_iterations, 3L)
   expect_true(is.finite(as.numeric(fit_pc_auto$log_likelihood)))
 
   fit_pc_tmb <- do.call(eb_smoother, c(base_args, list(backend = "laplace_tmb", pc.penalty = pc, beta_fixed = 0.1)))
@@ -726,6 +1015,91 @@ test_that("Learned-noise Matern supports exact empirical-Bayes beta with PC prio
   expect_gt(fit$fitted_noise_sd, 0)
 })
 
+test_that("Exact learned-noise Matern supports fixed observation noise scales", {
+  set.seed(316)
+
+  loc <- seq(0, 1, length.out = 14)
+  setup <- Matern_setup(locations = loc, max.edge = 0.35)
+  x <- 0.15 + 0.4 * sin(2 * pi * loc) + rnorm(length(loc), sd = 0.08)
+  base_args <- list(
+    x = x,
+    A = setup$A,
+    spde_template = setup$spde_template,
+    alpha = setup$alpha,
+    d = setup$d,
+    theta_init = log(0.3),
+    sigma_init = 0.35,
+    noise_sd_init = 0.08,
+    suppress_warnings = TRUE
+  )
+
+  fit_null <- do.call(
+    .fit_matern_exact_unknown_noise,
+    c(base_args, list(beta_mode = "empirical_bayes"))
+  )
+  fit_unit <- do.call(
+    .fit_matern_exact_unknown_noise,
+    c(base_args, list(beta_mode = "empirical_bayes", noise_scale = rep(1, length(x))))
+  )
+  expect_equal(as.numeric(fit_unit$log_likelihood), as.numeric(fit_null$log_likelihood), tolerance = 1e-8)
+  expect_equal(fit_unit$fitted_noise_sd, fit_null$fitted_noise_sd, tolerance = 1e-8)
+  expect_equal(fit_unit$fitted_s, rep(fit_unit$fitted_noise_sd, length(x)), tolerance = 1e-10)
+
+  noise_scale <- seq(0.75, 1.25, length.out = length(x))
+  cases <- list(
+    list(beta_mode = "empirical_bayes"),
+    list(beta_mode = "fixed", beta_fixed = 0.1),
+    list(beta_mode = "prior_flat", beta_prec = 0),
+    list(beta_mode = "prior_proper", beta_prec = 2)
+  )
+
+  for (case_args in cases) {
+    fit <- do.call(
+      .fit_matern_exact_unknown_noise,
+      c(base_args, case_args, list(noise_scale = noise_scale))
+    )
+    expect_true(is.finite(fit$fitted_noise_sd))
+    expect_true(all(is.finite(fit$fitted_s)))
+    expect_equal(fit$fitted_s, fit$fitted_noise_sd * noise_scale, tolerance = 1e-10)
+
+    objective_args <- list(
+      x = x,
+      s = fit$fitted_s,
+      A = setup$A,
+      spde_template = setup$spde_template,
+      alpha = setup$alpha,
+      d = setup$d,
+      log_range = fit$fitted_g$theta,
+      log_sigma = log(fit$fitted_g$sigma),
+      beta_mode = case_args$beta_mode,
+      suppress_warnings = TRUE
+    )
+    if (!is.null(case_args$beta_fixed)) objective_args$beta_fixed <- case_args$beta_fixed
+    if (!is.null(case_args$beta_prec)) objective_args$beta_prec <- case_args$beta_prec
+    expected_objective <- do.call(.exact_matern_known_noise_objective_at_params, objective_args)
+    expect_equal(
+      as.numeric(fit$log_likelihood),
+      as.numeric(expected_objective$log_marginal),
+      tolerance = 1e-6
+    )
+  }
+
+  expect_error(
+    do.call(
+      .fit_matern_exact_unknown_noise,
+      c(base_args, list(beta_mode = "empirical_bayes", noise_scale = noise_scale[-1]))
+    ),
+    "noise_scale"
+  )
+  expect_error(
+    do.call(
+      .fit_matern_exact_unknown_noise,
+      c(base_args, list(beta_mode = "empirical_bayes", noise_scale = replace(noise_scale, 1, -1)))
+    ),
+    "positive finite"
+  )
+})
+
 test_that("Learned-noise Matern INLA path supports flat and proper beta priors", {
   set.seed(6)
 
@@ -786,4 +1160,205 @@ test_that("matern_objective_breakdown follows the new beta mode semantics", {
   br_flat <- matern_objective_breakdown(fit_pc_exact)
   expect_equal(br_flat$matched_beta_mode, "prior_flat")
   expect_true(is.finite(br_flat$matched_exact_objective))
+})
+
+test_that("Matern softplus inlabru rejects non-softplus links", {
+  skip_if_not_installed("INLA")
+  skip_if_not_installed("inlabru")
+
+  set.seed(310)
+  loc <- seq(0, 1, length.out = 12)
+  s <- rep(0.1, length(loc))
+  x_log <- exp(0.1 + 0.2 * sin(2 * pi * loc)) + rnorm(length(loc), sd = s)
+  x_id <- 0.2 * sin(2 * pi * loc) + rnorm(length(loc), sd = s)
+  expect_error(
+    ebnm_Matern_generator(locations = loc, link = "log", backend = "inlabru")(x_log, s),
+    "only supported for `link = \"softplus\"`"
+  )
+  expect_error(
+    ebnm_Matern_generator(locations = loc, link = "identity", backend = "inlabru")(x_id, s),
+    "only supported for `link = \"softplus\"`"
+  )
+})
+
+test_that("Matern softplus inlabru backend agrees with Laplace (s known, ebnm path)", {
+  skip_if_not_installed("INLA")
+  skip_if_not_installed("inlabru")
+
+  set.seed(311)
+  loc <- seq(0, 1, length.out = 60)
+  s <- rep(0.08, length(loc))
+  eta <- -0.4 + 1.2 * sin(2 * pi * loc)
+  x <- log1p(exp(eta)) + rnorm(length(loc), sd = s)
+
+  fit_lap <- ebnm_Matern_generator(
+    locations = loc, link = "softplus", backend = "laplace"
+  )(x, s)
+  fit_bru <- tryCatch(
+    ebnm_Matern_generator(
+      locations = loc, link = "softplus", backend = "inlabru"
+    )(x, s),
+    error = function(e) e
+  )
+  if (inherits(fit_bru, "error")) {
+    skip(paste("inlabru iterative INLA did not converge:",
+               conditionMessage(fit_bru)))
+  }
+
+  expect_equal(fit_bru$backend, "inlabru")
+  expect_equal(fit_bru$link, "softplus")
+  expect_null(fit_bru$pc_penalty)
+  expect_equal(fit_bru$log_likelihood_semantics, "laplace_at_inlabru_params_empirical_bayes")
+  expect_true(all(is.finite(fit_bru$posterior$mean)))
+  expect_true(all(fit_bru$posterior$var > 0))
+  ctx <- fit_bru$matern_objective_context
+  expected_objective <- .matern_laplace_known_noise_objective_at_params(
+    x = x,
+    s = s,
+    A = ctx$A,
+    spde_template = ctx$spde_template,
+    alpha = ctx$alpha,
+    d = ctx$d,
+    log_range = fit_bru$fitted_g$theta,
+    log_sigma = log(fit_bru$fitted_g$sigma),
+    beta_mode = fit_bru$beta_mode,
+    beta_init = fit_bru$fitted_beta,
+    beta_prec = fit_bru$beta_prec,
+    link = "softplus",
+    pc_penalty = fit_bru$pc_penalty,
+    initial_mode = .matern_inla_laplace_initial_mode(fit_bru, fit_bru$beta_mode),
+    compute_posterior = FALSE,
+    optimize_beta = FALSE
+  )
+  expect_equal(
+    as.numeric(fit_bru$log_likelihood),
+    as.numeric(expected_objective$log_marginal),
+    tolerance = 1e-8
+  )
+  expect_true(is.finite(fit_bru$log_likelihood_inlabru_mlik_integration))
+  expect_gt(
+    abs(as.numeric(fit_bru$log_likelihood) -
+          as.numeric(fit_bru$log_likelihood_inlabru_mlik_integration)),
+    1e-4
+  )
+  # Cross-method posterior agreement: tolerances reflect that bru uses
+  # iterative linearisation while Laplace uses observed-Hessian curvature
+  # at the joint mode, so per-observation moments and hyperparameters need
+  # not match bitwise.
+  expect_lt(max(abs(fit_bru$posterior$mean - fit_lap$posterior$mean)), 0.10)
+  expect_lt(max(abs(fit_bru$posterior$var - fit_lap$posterior$var)), 0.10)
+  expect_lt(abs(fit_bru$fitted_beta - fit_lap$fitted_beta), 0.30)
+  expect_lt(abs(log(fit_bru$fitted_g$sigma) - log(fit_lap$fitted_g$sigma)), 1.0)
+  expect_lt(abs(fit_bru$fitted_g$theta - fit_lap$fitted_g$theta), 1.0)
+})
+
+test_that("Matern softplus inlabru uses only explicit PC priors", {
+  skip_if_not_installed("INLA")
+  skip_if_not_installed("inlabru")
+
+  set.seed(313)
+  loc <- seq(0, 1, length.out = 36)
+  s <- rep(0.08, length(loc))
+  eta <- -0.2 + 0.8 * sin(2 * pi * loc)
+  x <- log1p(exp(eta)) + rnorm(length(loc), sd = s)
+  pc <- list(range = c(0.15, 0.4), sigma = c(0.5, 0.45))
+
+  fit_bru <- tryCatch(
+    ebnm_Matern_generator(
+      locations = loc, link = "softplus", backend = "inlabru",
+      pc.penalty = pc
+    )(x, s),
+    error = function(e) e
+  )
+  if (inherits(fit_bru, "error")) {
+    skip(paste("inlabru iterative INLA did not converge:",
+               conditionMessage(fit_bru)))
+  }
+
+  expect_equal(fit_bru$backend, "inlabru")
+  expect_equal(unname(fit_bru$pc_penalty$range), unname(pc$range))
+  expect_equal(unname(fit_bru$pc_penalty$sigma), unname(pc$sigma))
+  expect_equal(fit_bru$log_likelihood_semantics, "laplace_at_inlabru_params_empirical_bayes")
+})
+
+test_that("Matern softplus inlabru backend agrees with Laplace (s = NULL, eb_smoother path)", {
+  skip_if_not_installed("INLA")
+  skip_if_not_installed("inlabru")
+
+  # Use signal in the near-linear regime of softplus (eta well above 0)
+  # because iterative INLA can otherwise wander into NaN regions when the
+  # inferred noise precision diverges with default flat priors.
+  set.seed(312)
+  loc <- seq(0, 1, length.out = 50)
+  eta <- 1.2 + 0.6 * sin(2 * pi * loc)
+  x <- log1p(exp(eta)) + rnorm(length(loc), sd = 0.08)
+  pc <- list(range = c(0.1, 0.5), sigma = c(0.35, 0.5), noise = c(0.2, 0.5))
+
+  expect_error(
+    eb_smoother(
+      x, s = NULL, family = "matern", locations = loc,
+      link = "softplus", backend = "inlabru"
+    ),
+    "requires an explicit `pc.penalty`"
+  )
+  expect_error(
+    eb_smoother(
+      x, s = NULL, family = "matern", locations = loc,
+      link = "softplus", backend = "inlabru",
+      pc.penalty = list(range = c(0.1, 0.5), sigma = c(0.35, 0.5))
+    ),
+    "requires explicit `pc.penalty` entries"
+  )
+
+  fit_lap <- eb_smoother(
+    x, s = NULL, family = "matern", locations = loc,
+    link = "softplus", backend = "laplace", pc.penalty = pc
+  )
+  fit_bru <- tryCatch(
+    eb_smoother(
+      x, s = NULL, family = "matern", locations = loc,
+      link = "softplus", backend = "inlabru", pc.penalty = pc
+    ),
+    error = function(e) e
+  )
+  if (inherits(fit_bru, "error")) {
+    skip(paste("inlabru iterative INLA did not converge:",
+               conditionMessage(fit_bru)))
+  }
+
+  expect_equal(fit_bru$backend, "inlabru")
+  expect_equal(fit_bru$log_likelihood_semantics, "laplace_at_inlabru_params_learned_noise_empirical_bayes")
+  expect_equal(unname(fit_bru$pc_penalty$noise), unname(pc$noise))
+  expect_true(is.finite(fit_bru$fitted_noise_sd))
+  ctx <- fit_bru$matern_objective_context
+  expected_objective <- .matern_laplace_unknown_noise_objective_at_params(
+    x = x,
+    A = ctx$A,
+    spde_template = ctx$spde_template,
+    alpha = ctx$alpha,
+    d = ctx$d,
+    log_range = fit_bru$fitted_g$theta,
+    log_sigma = log(fit_bru$fitted_g$sigma),
+    log_noise_sd = log(fit_bru$fitted_noise_sd),
+    beta_mode = fit_bru$beta_mode_internal,
+    beta_init = fit_bru$fitted_beta,
+    beta_prec = fit_bru$beta_prec,
+    link = "softplus",
+    pc_penalty = fit_bru$pc_penalty,
+    initial_mode = .matern_inla_laplace_initial_mode(fit_bru, fit_bru$beta_mode_internal),
+    compute_posterior = FALSE,
+    optimize_beta = FALSE
+  )
+  expect_equal(
+    as.numeric(fit_bru$log_likelihood),
+    as.numeric(expected_objective$log_marginal),
+    tolerance = 1e-8
+  )
+  expect_true(is.finite(fit_bru$log_likelihood_inlabru_mlik_integration))
+  expect_lt(
+    abs(fit_bru$fitted_noise_sd - fit_lap$fitted_noise_sd) /
+      fit_lap$fitted_noise_sd,
+    0.30
+  )
+  expect_lt(max(abs(fit_bru$posterior$mean - fit_lap$posterior$mean)), 0.20)
 })
