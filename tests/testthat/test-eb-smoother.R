@@ -471,14 +471,14 @@ test_that("Matern wrapper mirrors generator Fisher auto backend policy for log-l
     beta_fixed = 0
   )
 
-  expect_equal(fit_fixed$backend, "laplace_fisher")
-  expect_equal(fit_fixed$raw_fit$backend, "laplace_fisher")
+  expect_equal(fit_fixed$backend, "fisher_pql")
+  expect_equal(fit_fixed$raw_fit$backend, "fisher_pql")
   expect_equal(fit_fixed$raw_fit$laplace_curvature, "fisher")
-  expect_equal(fit_eb$backend, "laplace_fisher")
-  expect_equal(fit_eb$raw_fit$laplace_implementation, "tmb")
+  expect_equal(fit_eb$backend, "fisher_pql")
+  expect_equal(fit_eb$raw_fit$laplace_implementation, "exact_fisher_pql")
   expect_equal(fit_eb$raw_fit$laplace_curvature, "fisher")
-  expect_equal(fit_learned_fixed$backend, "laplace_fisher")
-  expect_equal(fit_learned_fixed$raw_fit$laplace_implementation, "tmb")
+  expect_equal(fit_learned_fixed$backend, "fisher_pql")
+  expect_equal(fit_learned_fixed$raw_fit$laplace_implementation, "exact_fisher_pql")
   expect_equal(fit_learned_fixed$raw_fit$laplace_curvature, "fisher")
 })
 

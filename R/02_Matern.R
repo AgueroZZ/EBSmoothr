@@ -203,6 +203,102 @@ utils::globalVariables(".scale_w")
   c(log(ts$tau), log(ts$kappa))
 }
 
+# Precomputed context for assembling the stationary SPDE precision directly
+# from the template's M0/M1/M2 matrices without calling
+# INLA::inla.spde2.precision on every hyperparameter evaluation. The three
+# component matrices are aligned once onto the union sparsity pattern so a
+# precision build is just a scalar combination of cached x-slots. Returns NULL
+# whenever the template is not a plain stationary two-parameter model; callers
+# must then fall back to INLA.
+.matern_spde_direct_ctx <- function(spde_template) {
+  p <- tryCatch(spde_template$param.inla, error = function(e) NULL)
+  if (is.null(p)) return(NULL)
+  if (!all(c("M0", "M1", "M2", "B0", "B1", "B2", "n.theta", "transform") %in% names(p))) {
+    return(NULL)
+  }
+  if (!identical(as.integer(p$n.theta), 2L)) return(NULL)
+  if (!is.character(p$transform) || length(p$transform) != 1L) return(NULL)
+
+  rows_constant <- function(B) {
+    B <- as.matrix(B)
+    if (ncol(B) != 3L || nrow(B) < 1L) return(NULL)
+    for (j in seq_len(ncol(B))) {
+      if (any(B[, j] != B[1L, j])) return(NULL)
+    }
+    as.numeric(B[1L, ])
+  }
+  b0 <- rows_constant(p$B0)
+  b1 <- rows_constant(p$B1)
+  b2 <- rows_constant(p$B2)
+  if (is.null(b0) || is.null(b1) || is.null(b2)) return(NULL)
+
+  to_sym <- function(M) {
+    M <- Matrix::forceSymmetric(as(Matrix::Matrix(M, sparse = TRUE), "CsparseMatrix"))
+    as(M, "CsparseMatrix")
+  }
+  out <- tryCatch({
+    M0 <- to_sym(p$M0)
+    M1s <- to_sym(p$M1 + Matrix::t(p$M1))
+    M2 <- to_sym(p$M2)
+
+    # Union pattern via absolute values so no entry can cancel away.
+    U <- to_sym(abs(M0) + abs(M1s) + abs(M2))
+    Ut <- as(U, "TsparseMatrix")
+    n <- nrow(U)
+    key_u <- as.numeric(Ut@i) + as.numeric(Ut@j) * n
+
+    align <- function(M) {
+      Mt <- as(M, "TsparseMatrix")
+      key_m <- as.numeric(Mt@i) + as.numeric(Mt@j) * n
+      idx <- match(key_m, key_u)
+      if (anyNA(idx)) stop("component entry outside union pattern")
+      x <- numeric(length(key_u))
+      x[idx] <- Mt@x
+      x
+    }
+
+    list(
+      b0 = b0,
+      b1 = b1,
+      b2 = b2,
+      transform = p$transform,
+      U = U,
+      x0 = align(M0),
+      x1s = align(M1s),
+      x2 = align(M2)
+    )
+  }, error = function(e) NULL)
+  out
+}
+
+.matern_spde_precision_direct <- function(ctx, theta_spde) {
+  tv <- c(1, as.numeric(theta_spde))
+  phi0 <- exp(sum(ctx$b0 * tv))
+  phi1 <- exp(sum(ctx$b1 * tv))
+  phi2_lin <- sum(ctx$b2 * tv)
+  phi2 <- switch(
+    ctx$transform,
+    identity = phi2_lin,
+    log = 2 * exp(phi2_lin) - 1,
+    logit = cos(pi / (1 + exp(-phi2_lin))),
+    phi2_lin
+  )
+  Q <- ctx$U
+  Q@x <- phi0^2 * (phi1^2 * ctx$x0 + phi1 * phi2 * ctx$x1s + ctx$x2)
+  # Matrix caches factorizations inside @factors by reference; drop anything
+  # inherited from the shared pattern template so no stale factor can be
+  # picked up for the new numeric values.
+  Q@factors <- list()
+  Q
+}
+
+.matern_spde_template_with_direct_ctx <- function(spde_template) {
+  if (is.null(attr(spde_template, "EBSmoothr_direct_ctx", exact = TRUE))) {
+    attr(spde_template, "EBSmoothr_direct_ctx") <- .matern_spde_direct_ctx(spde_template)
+  }
+  spde_template
+}
+
 .matern_precision_from_log_params <- function(spde_template, alpha, d, log_range, log_sigma) {
   ts <- .matern_tau_from_range_sigma(
     range = exp(log_range),
@@ -211,8 +307,15 @@ utils::globalVariables(".scale_w")
     d = d
   )
   theta_spde <- c(log(ts$tau), log(ts$kappa))
-  Q <- INLA::inla.spde2.precision(spde_template, theta = theta_spde)
-  Q <- Matrix::forceSymmetric(Matrix::Matrix(Q, sparse = TRUE))
+  ctx <- attr(spde_template, "EBSmoothr_direct_ctx", exact = TRUE)
+  Q <- if (!is.null(ctx)) {
+    .matern_spde_precision_direct(ctx, theta_spde)
+  } else {
+    Matrix::forceSymmetric(Matrix::Matrix(
+      INLA::inla.spde2.precision(spde_template, theta = theta_spde),
+      sparse = TRUE
+    ))
+  }
 
   list(
     Q = Q,
@@ -224,7 +327,44 @@ utils::globalVariables(".scale_w")
   )
 }
 
-.exact_matern_sufficient_stats <- function(x, s, A, spde_template, alpha, d, log_range, log_sigma) {
+# Data-side pieces of the exact Gaussian sufficient statistics. These depend
+# only on (x, s, A), so within one hyperparameter optimization they are
+# constant and can be computed once instead of once per objective evaluation.
+.exact_matern_data_stats <- function(x, s, A) {
+  x <- as.numeric(x)
+  s <- as.numeric(s)
+  A <- Matrix::Matrix(A, sparse = TRUE)
+  w_prec_diag <- 1 / (s^2)
+  AtW <- Matrix::t(A) %*% Matrix::Diagonal(x = w_prec_diag)
+  AtWA <- Matrix::forceSymmetric(Matrix::Matrix(AtW %*% A, sparse = TRUE))
+  list(
+    AtWA = AtWA,
+    c_x = as.numeric(AtW %*% x),
+    c_u = as.numeric(Matrix::rowSums(AtW)),
+    sxx = sum(w_prec_diag * x^2),
+    suu = sum(w_prec_diag),
+    sxu = sum(w_prec_diag * x),
+    logdet_D = sum(log(s^2))
+  )
+}
+
+# Rescale unit-noise data stats to noise SD `noise_sd`; `unit` must have been
+# computed with s equal to the per-observation noise scales (or all ones).
+.scale_exact_matern_data_stats <- function(unit, noise_sd, n_obs) {
+  inv <- 1 / noise_sd^2
+  list(
+    AtWA = unit$AtWA * inv,
+    c_x = unit$c_x * inv,
+    c_u = unit$c_u * inv,
+    sxx = unit$sxx * inv,
+    suu = unit$suu * inv,
+    sxu = unit$sxu * inv,
+    logdet_D = unit$logdet_D + 2 * n_obs * log(noise_sd)
+  )
+}
+
+.exact_matern_sufficient_stats <- function(x, s, A, spde_template, alpha, d, log_range, log_sigma,
+                                           data_stats = NULL) {
   .with_quiet_inla_defaults({
     if (any(!is.finite(c(log_range, log_sigma)))) {
       stop("All Matern hyperparameters must be finite.")
@@ -246,24 +386,23 @@ utils::globalVariables(".scale_w")
     Q <- precision$Q
     Q_factor <- precision$Q_factor
 
-    w_prec_diag <- 1 / (s^2)
-    W <- Matrix::Diagonal(x = w_prec_diag)
-    AtW <- Matrix::t(A) %*% W
+    if (is.null(data_stats)) {
+      data_stats <- .exact_matern_data_stats(x = x, s = s, A = A)
+    }
 
-    Q_post <- Q + AtW %*% A
+    Q_post <- Q + data_stats$AtWA
     Q_post <- Matrix::forceSymmetric(Matrix::Matrix(Q_post, sparse = TRUE))
     Q_post_factor <- .factorize_spd(Q_post)
 
     solve_post <- function(rhs) as.numeric(.solve_spd_factor(Q_post_factor, rhs))
 
     x <- as.numeric(x)
-    u <- rep(1, length(x))
-    c_x <- as.numeric(AtW %*% x)
-    c_u <- as.numeric(AtW %*% u)
+    c_x <- data_stats$c_x
+    c_u <- data_stats$c_u
 
-    quad_x <- sum(w_prec_diag * x^2) - sum(c_x * solve_post(c_x))
-    quad_u <- sum(w_prec_diag * u^2) - sum(c_u * solve_post(c_u))
-    cross_ux <- sum(w_prec_diag * x * u) - sum(c_u * solve_post(c_x))
+    quad_x <- data_stats$sxx - sum(c_x * solve_post(c_x))
+    quad_u <- data_stats$suu - sum(c_u * solve_post(c_u))
+    cross_ux <- data_stats$sxu - sum(c_u * solve_post(c_x))
 
     if (!is.finite(quad_u) || quad_u <= 0) {
       stop("The generalized intercept precision is not positive.")
@@ -272,7 +411,7 @@ utils::globalVariables(".scale_w")
     beta_profile_hat <- cross_ux / quad_u
     quad_profile <- quad_x - cross_ux^2 / quad_u
 
-    logdet_D <- sum(log(s^2))
+    logdet_D <- data_stats$logdet_D
     logdet_Q <- Q_factor$logdet
     logdet_Q_post <- Q_post_factor$logdet
     logdet_Sigma <- logdet_D - logdet_Q + logdet_Q_post
@@ -331,7 +470,8 @@ utils::globalVariables(".scale_w")
   ))
 }
 
-.exact_matern_profile_objective <- function(x, s, A, spde_template, alpha, d, log_range, log_sigma) {
+.exact_matern_profile_objective <- function(x, s, A, spde_template, alpha, d, log_range, log_sigma,
+                                            data_stats = NULL) {
   stats <- .exact_matern_sufficient_stats(
     x = x,
     s = s,
@@ -340,7 +480,8 @@ utils::globalVariables(".scale_w")
     alpha = alpha,
     d = d,
     log_range = log_range,
-    log_sigma = log_sigma
+    log_sigma = log_sigma,
+    data_stats = data_stats
   )
 
   list(
@@ -358,7 +499,8 @@ utils::globalVariables(".scale_w")
                                           d,
                                           log_range,
                                           log_sigma,
-                                          beta0) {
+                                          beta0,
+                                          data_stats = NULL) {
   beta0 <- .check_single_numeric(beta0, "beta0")
   stats <- .exact_matern_sufficient_stats(
     x = x,
@@ -368,7 +510,8 @@ utils::globalVariables(".scale_w")
     alpha = alpha,
     d = d,
     log_range = log_range,
-    log_sigma = log_sigma
+    log_sigma = log_sigma,
+    data_stats = data_stats
   )
 
   list(
@@ -386,7 +529,8 @@ utils::globalVariables(".scale_w")
                                           d,
                                           log_range,
                                           log_sigma,
-                                          beta_prec) {
+                                          beta_prec,
+                                          data_stats = NULL) {
   beta_prec <- .check_optional_beta_prec(beta_prec, "beta_prec")
   if (is.null(beta_prec) || beta_prec <= 0) {
     stop("`beta_prec` must be positive for the proper-beta objective.")
@@ -400,7 +544,8 @@ utils::globalVariables(".scale_w")
     alpha = alpha,
     d = d,
     log_range = log_range,
-    log_sigma = log_sigma
+    log_sigma = log_sigma,
+    data_stats = data_stats
   )
 
   list(
@@ -434,7 +579,8 @@ utils::globalVariables(".scale_w")
                                                           log_range,
                                                           log_sigma,
                                                           log_noise_sd,
-                                                          noise_scale = NULL) {
+                                                          noise_scale = NULL,
+                                                          data_stats_unit = NULL) {
   if (!is.finite(log_noise_sd)) {
     stop("`log_noise_sd` must be finite.")
   }
@@ -453,7 +599,10 @@ utils::globalVariables(".scale_w")
     alpha = alpha,
     d = d,
     log_range = log_range,
-    log_sigma = log_sigma
+    log_sigma = log_sigma,
+    data_stats = if (is.null(data_stats_unit)) NULL else {
+      .scale_exact_matern_data_stats(data_stats_unit, noise_sd, length(x))
+    }
   )
   objective$fitted_noise_sd <- as.numeric(noise_sd)
   objective$s <- s_eff
@@ -470,7 +619,8 @@ utils::globalVariables(".scale_w")
                                                         log_sigma,
                                                         beta0,
                                                         log_noise_sd,
-                                                        noise_scale = NULL) {
+                                                        noise_scale = NULL,
+                                                        data_stats_unit = NULL) {
   beta0 <- .check_single_numeric(beta0, "beta0")
   if (!is.finite(log_noise_sd)) {
     stop("`log_noise_sd` must be finite.")
@@ -491,7 +641,10 @@ utils::globalVariables(".scale_w")
     d = d,
     log_range = log_range,
     log_sigma = log_sigma,
-    beta0 = beta0
+    beta0 = beta0,
+    data_stats = if (is.null(data_stats_unit)) NULL else {
+      .scale_exact_matern_data_stats(data_stats_unit, noise_sd, length(x))
+    }
   )
   objective$fitted_noise_sd <- as.numeric(noise_sd)
   objective$s <- s_eff
@@ -508,7 +661,8 @@ utils::globalVariables(".scale_w")
                                                         log_sigma,
                                                         beta_prec,
                                                         log_noise_sd,
-                                                        noise_scale = NULL) {
+                                                        noise_scale = NULL,
+                                                        data_stats_unit = NULL) {
   beta_prec <- .check_optional_beta_prec(beta_prec, "beta_prec")
   if (is.null(beta_prec) || beta_prec <= 0) {
     stop("`beta_prec` must be positive for the proper-beta objective.")
@@ -532,7 +686,10 @@ utils::globalVariables(".scale_w")
     d = d,
     log_range = log_range,
     log_sigma = log_sigma,
-    beta_prec = beta_prec
+    beta_prec = beta_prec,
+    data_stats = if (is.null(data_stats_unit)) NULL else {
+      .scale_exact_matern_data_stats(data_stats_unit, noise_sd, length(x))
+    }
   )
   objective$fitted_noise_sd <- as.numeric(noise_sd)
   objective$s <- s_eff
@@ -3606,6 +3763,7 @@ matern_objective_breakdown <- function(fit,
   pql_stepA_log_marginals <- rep(NA_real_, pql_inner_iter)
   pseudo <- NULL
   stepA_fit <- NULL
+  pql_iters_run <- 0L
 
   for (pql_iter in seq_len(pql_inner_iter)) {
     pseudo <- .matern_fisher_pql_pseudo_response(
@@ -3667,7 +3825,13 @@ matern_objective_breakdown <- function(fit,
     if (isTRUE(learn_noise)) {
       noise_current <- as.numeric(stepA_fit$fitted_noise_sd)
     }
+    pql_iters_run <- pql_iter
+    if (pql_eta_change[pql_iter] <= pql_tol) break
   }
+
+  pql_floor_fraction <- pql_floor_fraction[seq_len(pql_iters_run)]
+  pql_eta_change <- pql_eta_change[seq_len(pql_iters_run)]
+  pql_stepA_log_marginals <- pql_stepA_log_marginals[seq_len(pql_iters_run)]
 
   exact_diag <- stepA_fit$exact_optimization
   if (is.null(exact_diag)) {
@@ -3729,16 +3893,17 @@ matern_objective_breakdown <- function(fit,
   }
   pql_diagnostics <- list(
     converged = identical(exact_convergence, 0L),
-    inner_iterations = as.integer(pql_inner_iter),
+    inner_iterations = as.integer(pql_iters_run),
+    max_inner_iter = as.integer(pql_inner_iter),
     stepA_engine = "exact_gaussian",
     g_floor = as.numeric(pql_g_floor),
     tol = as.numeric(pql_tol),
     initial_floor_fraction = pql_floor_fraction[1L],
-    stepA_floor_fraction = pql_floor_fraction[pql_inner_iter],
+    stepA_floor_fraction = pql_floor_fraction[pql_iters_run],
     final_floor_fraction = final_pseudo$floor_fraction,
     eta_change = pql_eta_change,
-    max_eta_change = pql_eta_change[pql_inner_iter],
-    eta_converged = pql_eta_change[pql_inner_iter] <= pql_tol,
+    max_eta_change = pql_eta_change[pql_iters_run],
+    eta_converged = pql_eta_change[pql_iters_run] <= pql_tol,
     final_effective_s_range = range(final_pseudo$s),
     outer_convergence = exact_convergence,
     outer_message = exact_message,
@@ -5016,6 +5181,7 @@ matern_objective_breakdown <- function(fit,
                                           fix_params = character()) {
   if (isTRUE(fix_g)) fix_params <- unique(c(fix_params, "range", "sigma"))
   fixed_names <- .matern_fixed_log_param_names(fix_params)
+  data_stats <- .exact_matern_data_stats(x = as.numeric(x), s = as.numeric(s), A = A)
   raw_eval_objective <- function(par) {
     if (beta_mode == "empirical_bayes") {
       .exact_matern_profile_objective(
@@ -5026,7 +5192,8 @@ matern_objective_breakdown <- function(fit,
         alpha = alpha,
         d = d,
         log_range = par[["log_range"]],
-        log_sigma = par[["log_sigma"]]
+        log_sigma = par[["log_sigma"]],
+        data_stats = data_stats
       )
     } else if (beta_mode == "fixed") {
       .exact_matern_fixed_objective(
@@ -5038,7 +5205,8 @@ matern_objective_breakdown <- function(fit,
         d = d,
         log_range = par[["log_range"]],
         log_sigma = par[["log_sigma"]],
-        beta0 = beta_fixed
+        beta0 = beta_fixed,
+        data_stats = data_stats
       )
     } else if (beta_mode == "prior_flat") {
       stats <- .exact_matern_sufficient_stats(
@@ -5049,7 +5217,8 @@ matern_objective_breakdown <- function(fit,
         alpha = alpha,
         d = d,
         log_range = par[["log_range"]],
-        log_sigma = par[["log_sigma"]]
+        log_sigma = par[["log_sigma"]],
+        data_stats = data_stats
       )
       list(
         log_marginal = .exact_matern_loglik_integrated_flat_beta(stats, n_obs = length(x)),
@@ -5067,7 +5236,8 @@ matern_objective_breakdown <- function(fit,
         d = d,
         log_range = par[["log_range"]],
         log_sigma = par[["log_sigma"]],
-        beta_prec = beta_prec
+        beta_prec = beta_prec,
+        data_stats = data_stats
       )
     }
   }
@@ -5189,6 +5359,11 @@ matern_objective_breakdown <- function(fit,
   if (!is.null(noise_scale)) {
     noise_scale <- .exact_matern_unknown_noise_s(1, length(x), noise_scale)
   }
+  data_stats_unit <- .exact_matern_data_stats(
+    x = as.numeric(x),
+    s = if (is.null(noise_scale)) rep(1, length(x)) else noise_scale,
+    A = A
+  )
   raw_eval_objective <- function(par) {
     if (beta_mode == "empirical_bayes") {
       .exact_matern_profile_objective_unknown_noise(
@@ -5200,7 +5375,8 @@ matern_objective_breakdown <- function(fit,
         log_range = par[["log_range"]],
         log_sigma = par[["log_sigma"]],
         log_noise_sd = par[["log_noise"]],
-        noise_scale = noise_scale
+        noise_scale = noise_scale,
+        data_stats_unit = data_stats_unit
       )
     } else if (beta_mode == "fixed") {
       .exact_matern_fixed_objective_unknown_noise(
@@ -5213,7 +5389,8 @@ matern_objective_breakdown <- function(fit,
         log_sigma = par[["log_sigma"]],
         beta0 = beta_fixed,
         log_noise_sd = par[["log_noise"]],
-        noise_scale = noise_scale
+        noise_scale = noise_scale,
+        data_stats_unit = data_stats_unit
       )
     } else if (beta_mode == "prior_flat") {
       noise_sd <- exp(par[["log_noise"]])
@@ -5226,7 +5403,8 @@ matern_objective_breakdown <- function(fit,
         alpha = alpha,
         d = d,
         log_range = par[["log_range"]],
-        log_sigma = par[["log_sigma"]]
+        log_sigma = par[["log_sigma"]],
+        data_stats = .scale_exact_matern_data_stats(data_stats_unit, noise_sd, length(x))
       )
       objective <- list(
         log_marginal = .exact_matern_loglik_integrated_flat_beta(stats, n_obs = length(x)),
@@ -5249,7 +5427,8 @@ matern_objective_breakdown <- function(fit,
         log_sigma = par[["log_sigma"]],
         beta_prec = beta_prec,
         log_noise_sd = par[["log_noise"]],
-        noise_scale = noise_scale
+        noise_scale = noise_scale,
+        data_stats_unit = data_stats_unit
       )
     }
   }
@@ -5545,6 +5724,7 @@ matern_objective_breakdown <- function(fit,
     stop("`setup$A` must have one row per location.")
   }
   setup$penalty_range <- as.numeric(setup$penalty_range)
+  setup$spde_template <- .matern_spde_template_with_direct_ctx(setup$spde_template)
   class(setup) <- unique(c("Matern_setup", class(setup)))
   setup
 }
@@ -5640,6 +5820,7 @@ Matern_setup <- function(locations,
     } else {
       INLA::inla.spde2.matern(mesh = meshA$mesh, alpha = alpha)
     }
+    spde_template <- .matern_spde_template_with_direct_ctx(spde_template)
 
     structure(
       list(

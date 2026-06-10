@@ -8,3 +8,4 @@
 ^src/.*\.rds$
 ^\.positai$
 ^\.claude$
+^bench$

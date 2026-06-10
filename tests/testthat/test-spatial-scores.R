@@ -65,11 +65,11 @@ test_that("spatial_scores validates constant rename and supports Matern log link
   expect_equal(scores$scores$status, "ok")
   expect_equal(scores$scores$spatial_link, "log")
   expect_equal(scores$scores$spatial_backend_requested, "auto")
-  expect_equal(scores$scores$spatial_backend, "laplace_fisher")
+  expect_equal(scores$scores$spatial_backend, "fisher_pql")
   expect_equal(scores$scores$spatial_laplace_curvature, "fisher")
-  expect_equal(scores$scores$matern_backend, "laplace_fisher")
+  expect_equal(scores$scores$matern_backend, "fisher_pql")
   expect_equal(scores$scores$matern_laplace_curvature, "fisher")
-  expect_match(scores$scores$spatial_score_semantics, "^laplace_fisher_")
+  expect_match(scores$scores$spatial_score_semantics, "^fisher_laplace_at_fisher_pql_mode_")
   expect_equal(scores$scores$reference_family, "point_exponential")
   expect_true(is.finite(scores$scores$spatial_score))
   expect_true(is.finite(scores$scores$reference_score))
@@ -183,9 +183,9 @@ test_that("spatial_scores_permutation is deterministic and supports refit choice
     spatial = list(family = "matern", link = "log"),
     refit = FALSE
   )
-  expect_equal(perm_log$summary$spatial_backend, "laplace_fisher")
+  expect_equal(perm_log$summary$spatial_backend, "fisher_pql")
   expect_equal(perm_log$summary$spatial_laplace_curvature, "fisher")
-  expect_match(perm_log$summary$observed_score_semantics, "^laplace_fisher_")
+  expect_match(perm_log$summary$observed_score_semantics, "^fisher_laplace_at_fisher_pql_mode_")
   expect_true(all(perm_log$permutation_scores$laplace_curvature == "fisher"))
   expect_equal(
     perm_log$summary$p_value,

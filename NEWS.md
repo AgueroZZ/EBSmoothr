@@ -1,3 +1,44 @@
+# EBSmoothr 0.2.5
+
+## Performance
+
+- Sped up the sparse SPD factorization used across Matern and L-GP Laplace
+  objectives. `.factorize_spd()` now lets CHOLMOD choose supernodal
+  factorization (several times faster than the previous simplicial-only path
+  on 2D meshes), reuses cached symbolic analyses through numeric-only
+  refactorization when the sparsity pattern repeats across hyperparameter
+  evaluations, and computes log-determinants directly from the factor instead
+  of materializing the triangular factor with `Matrix::expand()`. The cache
+  size is controlled by `options(EBSmoothr.spd_factor_cache_max = 30L)`.
+- Stationary Matern SPDE precisions are now assembled directly from the
+  template's `M0`/`M1`/`M2` matrices with a precomputed aligned sparsity
+  pattern instead of calling `INLA::inla.spde2.precision()` on every
+  hyperparameter evaluation (~75x faster per precision build). Non-stationary
+  or non-standard templates automatically fall back to INLA.
+- Exact Gaussian Matern objectives now precompute the data-side sufficient
+  statistics (`A'WA`, `A'Wx`, `A'W1`, and scalar moments) once per
+  hyperparameter optimization instead of once per objective evaluation.
+  Learned-noise fits cache unit-noise statistics and rescale them per
+  evaluation.
+- The Fisher-PQL loop now stops early when the linear predictor change drops
+  below `pql_tol` instead of always running `pql_inner_iter` passes.
+  `fisher_pql_diagnostics$inner_iterations` now reports the number of passes
+  actually executed and the new `max_inner_iter` field reports the cap.
+
+## Validation
+
+- Added regression tests asserting the direct SPDE precision assembly matches
+  `INLA::inla.spde2.precision()` and that the factorization cache returns
+  correct log-determinants and solves across repeated and distinct sparsity
+  patterns.
+- Updated stale test expectations that still assumed non-identity
+  `backend = "auto"` resolves to `laplace_fisher`; since 0.2.4 the auto policy
+  routes log and softplus links to `fisher_pql` (these tests were failing
+  before the 0.2.5 changes).
+- Benchmarked the fisher_pql path against TMB `laplace_fisher` on 2D log and
+  softplus problems; fisher_pql remains several times faster at all tested
+  sizes, so the auto backend policy is unchanged.
+
 # EBSmoothr 0.2.4
 
 ## Improvements

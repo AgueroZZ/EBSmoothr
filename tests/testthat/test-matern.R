@@ -292,10 +292,20 @@ test_that("Matern log-link Fisher backend supports beta modes and learned noise"
   learned_flat <- eb_smoother(x, s = NULL, family = "matern", locations = loc, link = "log", beta_prec = 0)
   learned_proper <- eb_smoother(x, s = NULL, family = "matern", locations = loc, link = "log", beta_prec = 2)
 
-  for (fit in list(fit_eb, fit_fixed, fit_flat, fit_proper, learned_eb, learned_fixed, learned_flat, learned_proper)) {
+  for (fit in list(fit_eb, fit_fixed, fit_flat, fit_proper)) {
     expect_equal(fit$backend, "laplace_fisher")
     expect_equal(fit$laplace_curvature, "fisher")
     expect_match(fit$log_likelihood_semantics, "^laplace_fisher_")
+    expect_true(all(is.finite(fit$posterior$mean)))
+    expect_true(all(is.finite(fit$posterior$var)))
+  }
+
+  # eb_smoother() without an explicit backend follows the auto policy, which
+  # routes non-identity links to fisher_pql since 0.2.4.
+  for (fit in list(learned_eb, learned_fixed, learned_flat, learned_proper)) {
+    expect_equal(fit$backend, "fisher_pql")
+    expect_equal(fit$laplace_curvature, "fisher")
+    expect_match(fit$log_likelihood_semantics, "^fisher_laplace_at_fisher_pql_mode_")
     expect_true(all(is.finite(fit$posterior$mean)))
     expect_true(all(is.finite(fit$posterior$var)))
   }
@@ -483,9 +493,17 @@ test_that("Matern Fisher-PQL exposes pseudo-Gaussian update count", {
     backend = "fisher_pql"
   )(x, s)
 
-  expect_equal(fit$fisher_pql_diagnostics$inner_iterations, 3L)
-  expect_equal(length(fit$fisher_pql_diagnostics$eta_change), 3L)
-  expect_equal(length(fit$fisher_pql_diagnostics$stepA_log_marginals), 3L)
+  expect_equal(fit$fisher_pql_diagnostics$max_inner_iter, 3L)
+  expect_gte(fit$fisher_pql_diagnostics$inner_iterations, 1L)
+  expect_lte(fit$fisher_pql_diagnostics$inner_iterations, 3L)
+  expect_equal(
+    length(fit$fisher_pql_diagnostics$eta_change),
+    fit$fisher_pql_diagnostics$inner_iterations
+  )
+  expect_equal(
+    length(fit$fisher_pql_diagnostics$stepA_log_marginals),
+    fit$fisher_pql_diagnostics$inner_iterations
+  )
 
   fit_two <- ebnm_Matern_generator(
     locations = loc,
@@ -494,9 +512,16 @@ test_that("Matern Fisher-PQL exposes pseudo-Gaussian update count", {
     pql_inner_iter = 2L
   )(x, s)
 
-  expect_equal(fit_two$fisher_pql_diagnostics$inner_iterations, 2L)
-  expect_equal(length(fit_two$fisher_pql_diagnostics$eta_change), 2L)
-  expect_equal(length(fit_two$fisher_pql_diagnostics$stepA_log_marginals), 2L)
+  expect_equal(fit_two$fisher_pql_diagnostics$max_inner_iter, 2L)
+  expect_lte(fit_two$fisher_pql_diagnostics$inner_iterations, 2L)
+  expect_equal(
+    length(fit_two$fisher_pql_diagnostics$eta_change),
+    fit_two$fisher_pql_diagnostics$inner_iterations
+  )
+  expect_equal(
+    length(fit_two$fisher_pql_diagnostics$stepA_log_marginals),
+    fit_two$fisher_pql_diagnostics$inner_iterations
+  )
 
   fit_learned_two <- eb_smoother(
     x,
@@ -508,9 +533,16 @@ test_that("Matern Fisher-PQL exposes pseudo-Gaussian update count", {
     pql_inner_iter = 2L
   )
 
-  expect_equal(fit_learned_two$raw_fit$fisher_pql_diagnostics$inner_iterations, 2L)
-  expect_equal(length(fit_learned_two$raw_fit$fisher_pql_diagnostics$eta_change), 2L)
-  expect_equal(length(fit_learned_two$raw_fit$fisher_pql_diagnostics$stepA_log_marginals), 2L)
+  expect_equal(fit_learned_two$raw_fit$fisher_pql_diagnostics$max_inner_iter, 2L)
+  expect_lte(fit_learned_two$raw_fit$fisher_pql_diagnostics$inner_iterations, 2L)
+  expect_equal(
+    length(fit_learned_two$raw_fit$fisher_pql_diagnostics$eta_change),
+    fit_learned_two$raw_fit$fisher_pql_diagnostics$inner_iterations
+  )
+  expect_equal(
+    length(fit_learned_two$raw_fit$fisher_pql_diagnostics$stepA_log_marginals),
+    fit_learned_two$raw_fit$fisher_pql_diagnostics$inner_iterations
+  )
 
   expect_error(
     ebnm_Matern_generator(
@@ -811,7 +843,9 @@ test_that("Matern wrapper supports known and learned-noise log links", {
   expect_equal(fit_learned$raw_fit$laplace_implementation, "exact_fisher_pql")
   expect_equal(fit_learned$raw_fit$laplace_curvature, "fisher")
   expect_equal(fit_learned$log_likelihood_semantics, "fisher_laplace_at_fisher_pql_mode_empirical_bayes")
-  expect_equal(fit_learned$raw_fit$fisher_pql_diagnostics$inner_iterations, 3L)
+  expect_equal(fit_learned$raw_fit$fisher_pql_diagnostics$max_inner_iter, 3L)
+  expect_gte(fit_learned$raw_fit$fisher_pql_diagnostics$inner_iterations, 1L)
+  expect_lte(fit_learned$raw_fit$fisher_pql_diagnostics$inner_iterations, 3L)
   expect_equal(fit_learned$noise_mode, "estimated")
   expect_gt(fit_learned$fitted_noise_sd, 0)
   expect_true(all(fit_learned$posterior$mean > 0))
@@ -1465,4 +1499,119 @@ test_that("Matern softplus inlabru backend agrees with Laplace (s = NULL, eb_smo
     0.30
   )
   expect_lt(max(abs(fit_bru$posterior$mean - fit_lap$posterior$mean)), 0.20)
+})
+
+test_that("direct SPDE precision assembly matches INLA across hyperparameters", {
+  skip_if_not_installed("INLA")
+
+  loc <- as.matrix(expand.grid(
+    x = seq(0, 1, length.out = 5),
+    y = seq(0, 1, length.out = 5)
+  ))
+  setup <- Matern_setup(locations = loc, max.edge = 0.6)
+  ctx <- attr(setup$spde_template, "EBSmoothr_direct_ctx", exact = TRUE)
+  expect_false(is.null(ctx))
+
+  for (pars in list(c(log(0.3), log(0.5)), c(log(1.2), log(2)))) {
+    pr <- EBSmoothr:::.matern_precision_from_log_params(
+      spde_template = setup$spde_template,
+      alpha = setup$alpha,
+      d = setup$d,
+      log_range = pars[1],
+      log_sigma = pars[2]
+    )
+    theta_spde <- EBSmoothr:::.matern_spde_theta_from_log_range_log_sigma(
+      pars[1], pars[2], setup$alpha, setup$d
+    )
+    Q_ref <- Matrix::forceSymmetric(Matrix::Matrix(
+      INLA::inla.spde2.precision(setup$spde_template, theta = theta_spde),
+      sparse = TRUE
+    ))
+    expect_lt(
+      max(abs(pr$Q - Q_ref)),
+      1e-8 * max(abs(Q_ref@x))
+    )
+    expect_equal(
+      pr$Q_factor$logdet,
+      as.numeric(Matrix::determinant(Q_ref, logarithm = TRUE)$modulus),
+      tolerance = 1e-8
+    )
+  }
+
+  # Templates without the precomputed context fall back to INLA.
+  template_plain <- setup$spde_template
+  attr(template_plain, "EBSmoothr_direct_ctx") <- NULL
+  pr_fallback <- EBSmoothr:::.matern_precision_from_log_params(
+    spde_template = template_plain,
+    alpha = setup$alpha,
+    d = setup$d,
+    log_range = log(0.7),
+    log_sigma = log(1.1)
+  )
+  pr_direct <- EBSmoothr:::.matern_precision_from_log_params(
+    spde_template = setup$spde_template,
+    alpha = setup$alpha,
+    d = setup$d,
+    log_range = log(0.7),
+    log_sigma = log(1.1)
+  )
+  expect_lt(max(abs(pr_fallback$Q - pr_direct$Q)), 1e-8 * max(abs(pr_direct$Q@x)))
+})
+
+test_that("sparse SPD factorization cache reuses symbolic analyses correctly", {
+  set.seed(404)
+  n <- 60
+  B <- Matrix::rsparsematrix(n, n, density = 0.08)
+  Q1 <- Matrix::forceSymmetric(Matrix::crossprod(B) + Matrix::Diagonal(n, 1))
+  Q2 <- Matrix::forceSymmetric(Matrix::crossprod(B) + Matrix::Diagonal(n, 4))
+
+  f1 <- EBSmoothr:::.factorize_spd(Q1)
+  f2 <- EBSmoothr:::.factorize_spd(Q2)
+
+  expect_equal(
+    f1$logdet,
+    as.numeric(Matrix::determinant(Q1, logarithm = TRUE)$modulus),
+    tolerance = 1e-10
+  )
+  expect_equal(
+    f2$logdet,
+    as.numeric(Matrix::determinant(Q2, logarithm = TRUE)$modulus),
+    tolerance = 1e-10
+  )
+
+  rhs <- rnorm(n)
+  expect_lt(
+    max(abs(
+      as.numeric(EBSmoothr:::.solve_spd_factor(f2, rhs)) -
+        as.numeric(Matrix::solve(Q2, rhs))
+    )),
+    1e-8
+  )
+
+  # A different pattern with the same dimension must not reuse the analysis.
+  Q3 <- Matrix::forceSymmetric(
+    Matrix::crossprod(Matrix::rsparsematrix(n, n, density = 0.12)) +
+      Matrix::Diagonal(n, 1)
+  )
+  f3 <- EBSmoothr:::.factorize_spd(Q3)
+  expect_equal(
+    f3$logdet,
+    as.numeric(Matrix::determinant(Q3, logarithm = TRUE)$modulus),
+    tolerance = 1e-10
+  )
+
+  cache <- EBSmoothr:::.spd_factor_cache
+  old_cache_max <- getOption("EBSmoothr.spd_factor_cache_max")
+  on.exit({
+    options(EBSmoothr.spd_factor_cache_max = old_cache_max)
+    rm(list = ls(cache), envir = cache)
+  }, add = TRUE)
+
+  rm(list = ls(cache), envir = cache)
+  options(EBSmoothr.spd_factor_cache_max = 2L)
+  invisible(EBSmoothr:::.factorize_spd(Q1))
+  invisible(EBSmoothr:::.factorize_spd(Q3))
+  invisible(EBSmoothr:::.factorize_spd(Matrix::Diagonal(n, 2)))
+  n_cached <- sum(vapply(ls(cache), function(k) length(cache[[k]]), integer(1)))
+  expect_equal(n_cached, 2L)
 })

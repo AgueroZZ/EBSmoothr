@@ -1,4 +1,89 @@
 # ---- internal: sparse SPD factorization and derived helpers ----
+
+# Cache of symbolic Cholesky analyses keyed by sparsity pattern. Repeated
+# factorizations of matrices with an identical pattern (Matern Q, Q_post, and
+# Laplace H across hyperparameter evaluations) reuse the fill-reducing
+# permutation and symbolic analysis via a numeric-only refactorization.
+# CHOLMOD silently accepts a mismatched pattern in an update, so candidate
+# entries are matched by exact (Dim, i, p) identity before reuse.
+.spd_factor_cache <- new.env(parent = emptyenv())
+.spd_factor_cache_next_id <- local({
+  id <- 0L
+  function() {
+    id <<- id + 1L
+    id
+  }
+})
+
+.spd_factor_cache_max <- function() {
+  max_entries <- getOption("EBSmoothr.spd_factor_cache_max", 30L)
+  if (!is.numeric(max_entries) || length(max_entries) != 1L || is.na(max_entries) || max_entries < 1) {
+    return(30L)
+  }
+  as.integer(max_entries)
+}
+
+.spd_factor_cache_lookup <- function(Q, perm) {
+  key <- paste(Q@Dim[1L], length(Q@i), Q@uplo, perm, sep = "_")
+  entries <- .spd_factor_cache[[key]]
+  if (!is.null(entries)) {
+    for (entry in entries) {
+      if (identical(entry$i, Q@i) && identical(entry$p, Q@p)) {
+        return(list(key = key, template = entry$template))
+      }
+    }
+  }
+  list(key = key, template = NULL)
+}
+
+.spd_factor_cache_n_entries <- function() {
+  keys <- ls(.spd_factor_cache)
+  if (!length(keys)) return(0L)
+  sum(vapply(keys, function(k) length(.spd_factor_cache[[k]]), integer(1)))
+}
+
+.spd_factor_cache_evict_oldest <- function() {
+  keys <- ls(.spd_factor_cache)
+  if (!length(keys)) return(FALSE)
+
+  oldest_key <- NULL
+  oldest_idx <- NULL
+  oldest_id <- Inf
+  for (key in keys) {
+    entries <- .spd_factor_cache[[key]]
+    ids <- vapply(entries, function(entry) {
+      if (is.null(entry$id)) -Inf else as.numeric(entry$id)
+    }, numeric(1))
+    idx <- which.min(ids)
+    if (length(idx) && ids[[idx]] < oldest_id) {
+      oldest_key <- key
+      oldest_idx <- idx
+      oldest_id <- ids[[idx]]
+    }
+  }
+
+  if (is.null(oldest_key)) return(FALSE)
+  entries <- .spd_factor_cache[[oldest_key]]
+  entries[[oldest_idx]] <- NULL
+  if (length(entries)) {
+    .spd_factor_cache[[oldest_key]] <- entries
+  } else {
+    rm(list = oldest_key, envir = .spd_factor_cache)
+  }
+  TRUE
+}
+
+.spd_factor_cache_store <- function(key, Q, template) {
+  while (.spd_factor_cache_n_entries() >= .spd_factor_cache_max()) {
+    if (!.spd_factor_cache_evict_oldest()) break
+  }
+  .spd_factor_cache[[key]] <- c(
+    .spd_factor_cache[[key]],
+    list(list(i = Q@i, p = Q@p, template = template, id = .spd_factor_cache_next_id()))
+  )
+  invisible(NULL)
+}
+
 .factorize_spd <- function(Q, perm = TRUE) {
   if (inherits(Q, "ebsmooth_spd_factor")) {
     return(Q)
@@ -6,18 +91,37 @@
 
   if (!inherits(Q, "Matrix")) Q <- Matrix::Matrix(Q, sparse = TRUE)
   Q <- Matrix::forceSymmetric(Q)
-  cholQ <- Matrix::Cholesky(Q, LDL = FALSE, perm = perm)
-  R <- if (inherits(cholQ, "CHMfactor")) {
-    Matrix::expand(cholQ)$L
+  if (!inherits(Q, "CsparseMatrix")) {
+    Q <- as(Q, "CsparseMatrix")
+  }
+
+  cholQ <- NULL
+  cacheable <- inherits(Q, "dsCMatrix")
+  hit <- if (cacheable) .spd_factor_cache_lookup(Q, perm) else NULL
+  if (!is.null(hit$template)) {
+    cholQ <- Matrix::.updateCHMfactor(hit$template, Q, mult = 0)
+  }
+  if (is.null(cholQ)) {
+    # super = NA lets CHOLMOD pick supernodal for 2D-mesh fill patterns
+    # (several times faster than simplicial) and simplicial for banded 1D.
+    cholQ <- Matrix::Cholesky(Q, LDL = FALSE, perm = perm, super = NA)
+    if (cacheable && inherits(cholQ, "CHMfactor")) {
+      .spd_factor_cache_store(hit$key, Q, cholQ)
+    }
+  }
+
+  logdet <- if (inherits(cholQ, "CHMfactor")) {
+    as.numeric(Matrix::determinant(cholQ, logarithm = TRUE, sqrt = FALSE)$modulus)
   } else {
-    as(cholQ, "dtrMatrix")
+    R <- as(cholQ, "dtrMatrix")
+    as.numeric(2 * sum(log(abs(Matrix::diag(R)))))
   }
 
   structure(
     list(
       matrix = Q,
       chol = cholQ,
-      logdet = as.numeric(2 * sum(log(abs(Matrix::diag(R))))),
+      logdet = logdet,
       perm = perm
     ),
     class = "ebsmooth_spd_factor"
