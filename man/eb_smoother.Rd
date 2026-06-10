@@ -23,6 +23,7 @@ eb_smoother(
   alpha = 2,
   max.edge = NULL,
   matern_n_starts = 1L,
+  pql_inner_iter = 3L,
   profile_s_lower = 1e-08,
   profile_s_upper = NULL,
   profile_s_tol = .Machine$double.eps^0.25,
@@ -46,8 +47,8 @@ exact Gaussian backend for \code{link = "identity"} and \code{"fisher_pql"} for
 \code{link = "log"} and \code{link = "softplus"}. Matern also
 supports explicit \code{"laplace"}, \code{"laplace_fisher"}, \code{"fisher_pql"},
 \code{"inla"}, and \code{"inlabru"}. The \code{"fisher_pql"} backend is an approximate
-Fisher/PQL backend for non-identity Matern fits. It uses three
-pseudo-Gaussian exact Matern Step A updates by default and reports a
+Fisher/PQL backend for non-identity Matern fits. It uses
+\code{pql_inner_iter} pseudo-Gaussian exact Matern Step A updates and reports a
 Fisher/Laplace score evaluated at the final PQL mode, not a true
 re-optimized original-model Laplace marginal likelihood. The \code{"inlabru"}
 backend runs
@@ -116,6 +117,11 @@ screening-oriented fits.}
 \item{matern_n_starts}{Number of Step A optimization starts for the
 package-owned TMB Matern Laplace learned-noise path. The default is \code{1};
 use \code{5} to reproduce the earlier multistart behavior.}
+
+\item{pql_inner_iter}{Positive integer number of Fisher/PQL pseudo-Gaussian
+Step A updates used by Matern \code{backend = "fisher_pql"} and by
+\code{backend = "auto"} when it resolves to Fisher-PQL for log or softplus
+Matern fits. The default is \code{3}.}
 
 \item{profile_s_lower, profile_s_upper}{Lower and upper bounds for profiling
 the scalar observation noise SD when \code{family} is one of the point-mass

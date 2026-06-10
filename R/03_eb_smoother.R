@@ -769,17 +769,19 @@ print.summary.eb_smoother_fit <- function(x, ...) {
   betaprec <- if (beta_mode == "empirical_bayes") -1 else beta_prec_use
   tmbdat$betaprec <- if (is.null(betaprec)) -1 else betaprec
 
-  if (is.null(g_init)) g_init <- LGP(0, beta = rep(0, pX), beta_prec = beta_prec_use)
-  theta0 <- .check_single_numeric(g_init$scale, "g_init$scale")
-  beta_init <- if (!is.null(beta_fixed_use)) {
-    beta_fixed_use
-  } else if (!is.null(g_init$beta)) {
-    .check_optional_beta_vector(g_init$beta, "g_init$beta", expected_length = pX, allow_null = FALSE)
-  } else {
-    rep(0, pX)
-  }
-  noise_sd0 <- stats::sd(x)
-  if (!is.finite(noise_sd0) || noise_sd0 <= 0) noise_sd0 <- 1
+  init <- .resolve_lgp_initial_state(
+    x = x,
+    X = tmbdat$X,
+    s = NULL,
+    g_init = g_init,
+    beta_fixed = beta_fixed_use,
+    beta_prec = beta_prec_use,
+    link = link,
+    learn_noise = TRUE
+  )
+  theta0 <- init$theta0
+  beta_init <- init$beta_init
+  noise_sd0 <- init$noise_sd0
 
   par0 <- list(
     theta = theta0,
@@ -1592,8 +1594,8 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
 #'   `link = "log"` and `link = "softplus"`. Matern also
 #'   supports explicit `"laplace"`, `"laplace_fisher"`, `"fisher_pql"`,
 #'   `"inla"`, and `"inlabru"`. The `"fisher_pql"` backend is an approximate
-#'   Fisher/PQL backend for non-identity Matern fits. It uses three
-#'   pseudo-Gaussian exact Matern Step A updates by default and reports a
+#'   Fisher/PQL backend for non-identity Matern fits. It uses
+#'   `pql_inner_iter` pseudo-Gaussian exact Matern Step A updates and reports a
 #'   Fisher/Laplace score evaluated at the final PQL mode, not a true
 #'   re-optimized original-model Laplace marginal likelihood. The `"inlabru"`
 #'   backend runs
@@ -1650,6 +1652,10 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
 #' @param matern_n_starts Number of Step A optimization starts for the
 #'   package-owned TMB Matern Laplace learned-noise path. The default is `1`;
 #'   use `5` to reproduce the earlier multistart behavior.
+#' @param pql_inner_iter Positive integer number of Fisher/PQL pseudo-Gaussian
+#'   Step A updates used by Matern `backend = "fisher_pql"` and by
+#'   `backend = "auto"` when it resolves to Fisher-PQL for log or softplus
+#'   Matern fits. The default is `3`.
 #' @param profile_s_lower,profile_s_upper Lower and upper bounds for profiling
 #'   the scalar observation noise SD when `family` is one of the point-mass
 #'   reference families and `s = NULL`. If `profile_s_upper = NULL`, it is set
@@ -1729,6 +1735,7 @@ eb_smoother <- function(x,
                         alpha = 2,
                         max.edge = NULL,
                         matern_n_starts = 1L,
+                        pql_inner_iter = 3L,
                         profile_s_lower = 1e-8,
                         profile_s_upper = NULL,
                         profile_s_tol = .Machine$double.eps^0.25,
@@ -1847,6 +1854,7 @@ eb_smoother <- function(x,
 
   if (family == "matern") {
     matern_n_starts <- .check_matern_n_starts(matern_n_starts)
+    pql_inner_iter <- .check_matern_pql_inner_iter(pql_inner_iter)
     fix_params_use <- .normalize_fix_params(
       fix_params = fix_params,
       allowed = c("range", "sigma", "beta"),
@@ -1940,7 +1948,8 @@ eb_smoother <- function(x,
         link = link,
         suppress_warnings = suppress_warnings,
         fix_g = fix_g,
-        fix_params = fix_params_use
+        fix_params = fix_params_use,
+        pql_max_iter = pql_inner_iter
       ) else .fit_matern_fisher_pql_unknown_noise(
         x = x,
         A = A,
@@ -1958,7 +1967,8 @@ eb_smoother <- function(x,
         link = link,
         suppress_warnings = suppress_warnings,
         fix_g = fix_g,
-        fix_params = fix_params_use
+        fix_params = fix_params_use,
+        pql_max_iter = pql_inner_iter
       )
       fit$data <- .eb_smoother_data_frame(x, if (s_known) s_vec else fit$fitted_s)
       fit$g_init <- resolved_init$g_init

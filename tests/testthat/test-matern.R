@@ -17,6 +17,63 @@ test_that("Matern generator supports log-link positive smoothing", {
   expect_true(is.finite(as.numeric(fit$log_likelihood)))
 })
 
+test_that("Matern non-identity initialization keeps latent and raw scales separate", {
+  x <- c(0.5, 1, 2, 4)
+  s <- c(1, 2, 1, 2)
+  w <- 1 / s^2
+  x_floor <- pmax(x, min(x[x > 0]) / 2)
+
+  init_log <- EBSmoothr:::.resolve_matern_g_init(
+    x = x,
+    s = s,
+    penalty_range0 = 1,
+    link = "log"
+  )
+  beta_log <- log(stats::weighted.mean(x, w = w))
+  eta_log <- log(x_floor)
+  w_log <- x_floor^2 / s^2
+  sigma_log <- sqrt(sum(w_log * (eta_log - beta_log)^2) / sum(w_log))
+  expect_equal(init_log$beta_init, beta_log, tolerance = 1e-12)
+  expect_equal(init_log$sigma_data, sigma_log, tolerance = 1e-12)
+
+  init_softplus <- EBSmoothr:::.resolve_matern_g_init(
+    x = x,
+    s = s,
+    penalty_range0 = 1,
+    link = "softplus"
+  )
+  beta_softplus <- .inverse_softplus_stable(stats::weighted.mean(x, w = w))
+  eta_softplus <- .inverse_softplus_stable(x_floor)
+  deriv_softplus <- .sigmoid_stable(eta_softplus)
+  w_softplus <- deriv_softplus^2 / s^2
+  sigma_softplus <- sqrt(sum(w_softplus * (eta_softplus - beta_softplus)^2) / sum(w_softplus))
+  expect_equal(init_softplus$beta_init, beta_softplus, tolerance = 1e-12)
+  expect_equal(init_softplus$sigma_data, sigma_softplus, tolerance = 1e-12)
+
+  x_learn <- c(0.2, 0.9, 2.5, 7.5, 9)
+  raw_scale <- stats::sd(x_learn - mean(x_learn))
+  init_log_learn <- EBSmoothr:::.resolve_matern_g_init(
+    x = x_learn,
+    s = NULL,
+    penalty_range0 = 1,
+    allow_noise = TRUE,
+    link = "log"
+  )
+  init_softplus_learn <- EBSmoothr:::.resolve_matern_g_init(
+    x = x_learn,
+    s = NULL,
+    penalty_range0 = 1,
+    allow_noise = TRUE,
+    link = "softplus"
+  )
+  expect_equal(init_log_learn$beta_init, log(mean(x_learn)), tolerance = 1e-12)
+  expect_equal(init_log_learn$noise_sd_init, raw_scale, tolerance = 1e-12)
+  expect_gt(abs(init_log_learn$noise_sd_init - init_log_learn$sigma_data), 0.1)
+  expect_equal(init_softplus_learn$beta_init, .inverse_softplus_stable(mean(x_learn)), tolerance = 1e-12)
+  expect_equal(init_softplus_learn$noise_sd_init, raw_scale, tolerance = 1e-12)
+  expect_gt(abs(init_softplus_learn$noise_sd_init - init_softplus_learn$sigma_data), 0.1)
+})
+
 test_that("Matern auto backend uses Fisher-PQL for log-link fits", {
   set.seed(111)
 
@@ -413,7 +470,7 @@ test_that("Matern Fisher-PQL Step A mode matches the sparse one-step reference",
   }
 })
 
-test_that("Matern Fisher-PQL defaults to three pseudo-Gaussian updates", {
+test_that("Matern Fisher-PQL exposes pseudo-Gaussian update count", {
   set.seed(2191)
   loc <- seq(0, 1, length.out = 10)
   s <- rep(0.1, length(loc))
@@ -429,6 +486,53 @@ test_that("Matern Fisher-PQL defaults to three pseudo-Gaussian updates", {
   expect_equal(fit$fisher_pql_diagnostics$inner_iterations, 3L)
   expect_equal(length(fit$fisher_pql_diagnostics$eta_change), 3L)
   expect_equal(length(fit$fisher_pql_diagnostics$stepA_log_marginals), 3L)
+
+  fit_two <- ebnm_Matern_generator(
+    locations = loc,
+    link = "softplus",
+    backend = "fisher_pql",
+    pql_inner_iter = 2L
+  )(x, s)
+
+  expect_equal(fit_two$fisher_pql_diagnostics$inner_iterations, 2L)
+  expect_equal(length(fit_two$fisher_pql_diagnostics$eta_change), 2L)
+  expect_equal(length(fit_two$fisher_pql_diagnostics$stepA_log_marginals), 2L)
+
+  fit_learned_two <- eb_smoother(
+    x,
+    s = NULL,
+    family = "matern",
+    locations = loc,
+    link = "softplus",
+    backend = "fisher_pql",
+    pql_inner_iter = 2L
+  )
+
+  expect_equal(fit_learned_two$raw_fit$fisher_pql_diagnostics$inner_iterations, 2L)
+  expect_equal(length(fit_learned_two$raw_fit$fisher_pql_diagnostics$eta_change), 2L)
+  expect_equal(length(fit_learned_two$raw_fit$fisher_pql_diagnostics$stepA_log_marginals), 2L)
+
+  expect_error(
+    ebnm_Matern_generator(
+      locations = loc,
+      link = "softplus",
+      backend = "fisher_pql",
+      pql_inner_iter = 0L
+    ),
+    "positive integer"
+  )
+  expect_error(
+    eb_smoother(
+      x,
+      s = s,
+      family = "matern",
+      locations = loc,
+      link = "softplus",
+      backend = "fisher_pql",
+      pql_inner_iter = 0L
+    ),
+    "positive integer"
+  )
 })
 
 test_that("Matern Fisher-PQL routes Step A through exact Gaussian fits, not TMB", {

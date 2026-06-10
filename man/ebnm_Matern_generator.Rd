@@ -15,6 +15,7 @@ ebnm_Matern_generator(
   compute_exact_diagnostic = FALSE,
   backend = c("auto", "exact", "laplace", "laplace_fisher", "fisher_pql", "inla",
     "inlabru"),
+  pql_inner_iter = 3L,
   link = c("identity", "log", "softplus", "logit", "probit")
 )
 }
@@ -62,10 +63,10 @@ if that TMB fit is unavailable or invalid. \code{"laplace_fisher"} uses the same
 hyperparameter fit when supported, but builds the returned posterior
 approximation and Fisher Laplace score with Fisher/Gauss-Newton curvature.
 \code{"fisher_pql"} is an approximate pseudo-likelihood backend that uses
-three Fisher/PQL pseudo-Gaussian exact Matern Step A updates by default. It
-reports a Fisher/Laplace score evaluated at the final PQL mode; this is an
-approximate PQL-mode score, not a true re-optimized original-model Laplace
-marginal likelihood.
+\code{pql_inner_iter} Fisher/PQL pseudo-Gaussian exact Matern Step A
+updates. It reports a Fisher/Laplace score evaluated at the final PQL mode;
+this is an approximate PQL-mode score, not a true re-optimized
+original-model Laplace marginal likelihood.
 The R reference backend \code{"laplace_r"} is accepted for internal
 validation only and is never reached automatically from public backends.
 \code{"inla"} is the independent INLA implementation and uses the supplied
@@ -81,6 +82,11 @@ Laplace default. For learned-noise fits with \code{s = NULL},
 \code{range}, \code{sigma}, and \code{noise} entries.
 Compatibility aliases \code{"laplace_tmb"} and \code{"inla_pc"} are still
 accepted.}
+
+\item{pql_inner_iter}{Positive integer number of Fisher/PQL pseudo-Gaussian
+Step A updates used by \code{backend = "fisher_pql"} and by
+\code{backend = "auto"} when it resolves to Fisher-PQL for log or softplus
+Matern fits. The default is \code{3}.}
 
 \item{link}{Link function. \code{"identity"} fits unconstrained Gaussian
 means. \code{"log"} and \code{"softplus"} fit positive mean functions and
@@ -168,7 +174,7 @@ quantities retained as diagnostics.
 
 For log-link and softplus-link fits, \code{backend = "auto"} uses
 \code{"fisher_pql"}. Fisher-PQL builds repeated pseudo-Gaussian exact Matern
-Step A fits and uses three internal pseudo-response updates by default. It
+Step A fits and uses \code{pql_inner_iter} pseudo-response updates. It
 reports a Fisher/Laplace score evaluated at the final PQL mode; this is an
 approximate PQL-mode score, not a true re-optimized original-model Laplace
 marginal likelihood. Explicit \code{backend = "laplace"} and

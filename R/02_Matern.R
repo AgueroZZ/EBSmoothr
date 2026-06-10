@@ -45,6 +45,15 @@ utils::globalVariables(".scale_w")
   matern_n_starts
 }
 
+.check_matern_pql_inner_iter <- function(pql_inner_iter) {
+  pql_inner_iter <- .check_single_numeric(pql_inner_iter, "pql_inner_iter")
+  if (!is.finite(pql_inner_iter) || pql_inner_iter < 1 ||
+      pql_inner_iter != floor(pql_inner_iter)) {
+    stop("`pql_inner_iter` must be a positive integer for Fisher-PQL.")
+  }
+  as.integer(pql_inner_iter)
+}
+
 .build_mesh_A <- function(loc_mat, max.edge = NULL) {
   .with_quiet_inla_defaults({
     d <- ncol(loc_mat)
@@ -906,12 +915,19 @@ utils::globalVariables(".scale_w")
   out
 }
 
-.matern_centered_scale <- function(x, center, s = NULL) {
+.matern_centered_scale <- function(x, center, s = NULL, weights = NULL) {
   x <- as.numeric(x)
   center <- as.numeric(center)[1]
   resid <- x - center
 
-  out <- if (is.null(s)) {
+  out <- if (!is.null(weights)) {
+    w <- as.numeric(weights)
+    if (length(w) != length(x) || anyNA(w) || any(!is.finite(w)) || any(w < 0) || sum(w) <= 0) {
+      NA_real_
+    } else {
+      sqrt(sum(w * resid^2) / sum(w))
+    }
+  } else if (is.null(s)) {
     stats::sd(resid)
   } else {
     w <- 1 / (as.numeric(s)^2)
@@ -929,16 +945,25 @@ utils::globalVariables(".scale_w")
 
 .matern_log_scale_observations <- function(x, s = NULL) {
   x <- as.numeric(x)
-  positive_x <- x[is.finite(x) & x > 0]
-  floor0 <- if (length(positive_x)) {
-    min(positive_x) / 2
-  } else if (!is.null(s)) {
-    min(as.numeric(s)) / 10
-  } else {
-    1e-6
-  }
-  if (!is.finite(floor0) || floor0 <= 0) floor0 <- 1e-6
+  floor0 <- .positive_response_floor(x, s = s)
   log(pmax(x, floor0))
+}
+
+.matern_link_scale_observations <- function(x, s = NULL, link = c("identity", "log", "softplus")) {
+  link <- match.arg(link)
+  x <- as.numeric(x)
+  if (identical(link, "identity")) {
+    return(list(eta = x, deriv = rep(1, length(x))))
+  }
+  x_floored <- pmax(x, .positive_response_floor(x, s = s))
+  if (identical(link, "log")) {
+    eta <- log(x_floored)
+    deriv <- x_floored
+  } else {
+    eta <- .inverse_softplus_stable(x_floored)
+    deriv <- .sigmoid_stable(eta)
+  }
+  list(eta = as.numeric(eta), deriv = as.numeric(deriv), response = as.numeric(x_floored))
 }
 
 .resolve_matern_beta_init <- function(x,
@@ -958,17 +983,7 @@ utils::globalVariables(".scale_w")
       allow_null = FALSE
     ))
   }
-  if (identical(link, "log")) {
-    x_log <- .matern_log_scale_observations(x, s = s)
-    if (is.null(s)) {
-      return(as.numeric(mean(x_log)))
-    }
-    return(as.numeric(stats::weighted.mean(x_log, w = 1 / (as.numeric(s)^2))))
-  }
-  if (is.null(s)) {
-    return(as.numeric(mean(x)))
-  }
-  as.numeric(stats::weighted.mean(x, w = 1 / (as.numeric(s)^2)))
+  .response_beta_init(x, s = s, link = link)
 }
 
 .resolve_matern_g_init <- function(x,
@@ -988,13 +1003,19 @@ utils::globalVariables(".scale_w")
     beta_fixed = beta_fixed,
     link = link
   )
-  x_scale <- if (identical(link, "log")) .matern_log_scale_observations(x, s = s) else x
-  sigma_data <- .matern_centered_scale(x = x_scale, center = beta_init, s = s)
+  link_scale <- .matern_link_scale_observations(x, s = s, link = link)
+  sigma_weights <- if (is.null(s)) NULL else (link_scale$deriv / as.numeric(s))^2
+  sigma_data <- .matern_centered_scale(
+    x = link_scale$eta,
+    center = beta_init,
+    weights = sigma_weights
+  )
+  noise_data <- .response_raw_residual_scale(x, eta = beta_init, link = link)
   pc_penalty0 <- .resolve_matern_pc_penalty(
     pc.penalty = pc.penalty,
     penalty_range0 = penalty_range0,
     sigma_anchor0 = sigma_data,
-    noise_anchor0 = sigma_data,
+    noise_anchor0 = noise_data,
     allow_noise = allow_noise
   )
 
@@ -1023,12 +1044,12 @@ utils::globalVariables(".scale_w")
     sigma_init <- sigma_data
   }
 
-  noise_sd_init <- sigma_data
+  noise_sd_init <- noise_data
   if (!is.null(pc_penalty0) && isTRUE(allow_noise) && !is.null(pc_penalty0$noise)) {
     noise_sd_init <- as.numeric(pc_penalty0$noise["anchor"])
   }
   if (!is.finite(noise_sd_init) || noise_sd_init <= 0) {
-    noise_sd_init <- sigma_data
+    noise_sd_init <- noise_data
   }
 
   list(
@@ -3548,16 +3569,12 @@ matern_objective_breakdown <- function(fit,
                                               noise_sd_init = NULL,
                                               fix_g = FALSE,
                                               fix_params = character(),
-                                             pql_inner_iter = 3L,
+                                              pql_inner_iter = 3L,
                                               pql_tol = 1e-4,
                                               pql_g_floor = 1e-6,
                                               suppress_warnings = TRUE) {
   link <- match.arg(link)
-  pql_inner_iter <- .check_single_numeric(pql_inner_iter, "pql_inner_iter")
-  if (!is.finite(pql_inner_iter) || pql_inner_iter < 1 || pql_inner_iter != floor(pql_inner_iter)) {
-    stop("`pql_inner_iter` must be a positive integer for Fisher-PQL.")
-  }
-  pql_inner_iter <- as.integer(pql_inner_iter)
+  pql_inner_iter <- .check_matern_pql_inner_iter(pql_inner_iter)
   pql_tol <- .check_single_numeric(pql_tol, "pql_tol")
   if (!is.finite(pql_tol) || pql_tol < 0) {
     stop("`pql_tol` must be non-negative for Fisher-PQL.")
@@ -5749,7 +5766,7 @@ Matern <- function(theta = NULL, sigma = 1, beta = NULL, beta_prec = NULL) {
 #'
 #' For log-link and softplus-link fits, \code{backend = "auto"} uses
 #' \code{"fisher_pql"}. Fisher-PQL builds repeated pseudo-Gaussian exact Matern
-#' Step A fits and uses three internal pseudo-response updates by default. It
+#' Step A fits and uses \code{pql_inner_iter} pseudo-response updates. It
 #' reports a Fisher/Laplace score evaluated at the final PQL mode; this is an
 #' approximate PQL-mode score, not a true re-optimized original-model Laplace
 #' marginal likelihood. Explicit \code{backend = "laplace"} and
@@ -5812,10 +5829,10 @@ Matern <- function(theta = NULL, sigma = 1, beta = NULL, beta_prec = NULL) {
 #'   hyperparameter fit when supported, but builds the returned posterior
 #'   approximation and Fisher Laplace score with Fisher/Gauss-Newton curvature.
 #'   \code{"fisher_pql"} is an approximate pseudo-likelihood backend that uses
-#'   three Fisher/PQL pseudo-Gaussian exact Matern Step A updates by default. It
-#'   reports a Fisher/Laplace score evaluated at the final PQL mode; this is an
-#'   approximate PQL-mode score, not a true re-optimized original-model Laplace
-#'   marginal likelihood.
+#'   \code{pql_inner_iter} Fisher/PQL pseudo-Gaussian exact Matern Step A
+#'   updates. It reports a Fisher/Laplace score evaluated at the final PQL mode;
+#'   this is an approximate PQL-mode score, not a true re-optimized
+#'   original-model Laplace marginal likelihood.
 #'   The R reference backend \code{"laplace_r"} is accepted for internal
 #'   validation only and is never reached automatically from public backends.
 #'   \code{"inla"} is the independent INLA implementation and uses the supplied
@@ -5831,6 +5848,10 @@ Matern <- function(theta = NULL, sigma = 1, beta = NULL, beta_prec = NULL) {
 #'   \code{range}, \code{sigma}, and \code{noise} entries.
 #'   Compatibility aliases \code{"laplace_tmb"} and \code{"inla_pc"} are still
 #'   accepted.
+#' @param pql_inner_iter Positive integer number of Fisher/PQL pseudo-Gaussian
+#'   Step A updates used by \code{backend = "fisher_pql"} and by
+#'   \code{backend = "auto"} when it resolves to Fisher-PQL for log or softplus
+#'   Matern fits. The default is \code{3}.
 #' @param link Link function. \code{"identity"} fits unconstrained Gaussian
 #'   means. \code{"log"} and \code{"softplus"} fit positive mean functions and
 #'   report posterior summaries on the positive response scale. \code{"logit"}
@@ -5861,6 +5882,7 @@ ebnm_Matern_generator <- function(locations = NULL,
                                   pc.penalty = NULL,
                                   compute_exact_diagnostic = FALSE,
                                   backend = c("auto", "exact", "laplace", "laplace_fisher", "fisher_pql", "inla", "inlabru"),
+                                  pql_inner_iter = 3L,
                                   link = c("identity", "log", "softplus", "logit", "probit")) {
 
   backend <- .match_matern_backend_arg(backend)
@@ -5868,6 +5890,7 @@ ebnm_Matern_generator <- function(locations = NULL,
   if (!link %in% c("identity", "log", "softplus")) {
     stop("The Matern implementation currently supports `link = \"identity\"`, `link = \"log\"`, and `link = \"softplus\"` only.")
   }
+  pql_inner_iter <- .check_matern_pql_inner_iter(pql_inner_iter)
 
   setup0 <- .resolve_matern_setup(
     locations = locations,
@@ -6069,7 +6092,8 @@ ebnm_Matern_generator <- function(locations = NULL,
         link = link,
         suppress_warnings = suppress_warnings,
         fix_g = fix_g,
-        fix_params = fix_params_use
+        fix_params = fix_params_use,
+        pql_max_iter = pql_inner_iter
       )
       fit$data <- data.frame(x = x, s = s)
       fit$mesh <- mesh

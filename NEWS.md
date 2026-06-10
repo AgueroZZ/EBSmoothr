@@ -1,9 +1,16 @@
-# EBSmoothr 0.2.3
+# EBSmoothr 0.2.4
 
 ## Improvements
 
 - Changed non-identity Matern `backend = "auto"` to use `backend =
   "fisher_pql"` for log and softplus links.
+- Exposed the public `pql_inner_iter` argument for Matern Fisher-PQL fits in
+  both `ebnm_Matern_generator()` and `eb_smoother()`. The default remains
+  three pseudo-Gaussian exact Step A updates.
+- Fixed non-identity initialization for Matern and L-GP fits so log and
+  softplus links initialize beta by matching the response-scale mean, keep
+  latent prior scales on the linear-predictor scale, and initialize learned
+  observation noise on the raw response scale.
 - Made the experimental softplus Matern `backend = "inlabru"` use explicit
   prior semantics: known-noise fits no longer synthesize a PC prior when
   `pc.penalty = NULL`, while learned-noise fits require an explicit

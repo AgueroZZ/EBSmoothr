@@ -533,6 +533,50 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
 
 
 
+.resolve_lgp_initial_state <- function(x,
+                                       X,
+                                       s = NULL,
+                                       g_init = NULL,
+                                       beta_fixed = NULL,
+                                       beta_prec = NULL,
+                                       link = c("identity", "log", "softplus"),
+                                       learn_noise = FALSE) {
+  link <- match.arg(link)
+  x <- as.numeric(x)
+  X <- Matrix::Matrix(X, sparse = TRUE)
+  pX <- ncol(X)
+
+  if (is.null(g_init)) {
+    g_init <- LGP(scale = 0, beta = NULL, beta_prec = beta_prec)
+  }
+  theta0 <- .check_single_numeric(g_init$scale, "g_init$scale")
+  beta_init <- if (!is.null(beta_fixed)) {
+    .check_optional_beta_vector(beta_fixed, "beta_fixed", expected_length = pX, allow_null = FALSE)
+  } else if (!is.null(g_init$beta)) {
+    .check_optional_beta_vector(g_init$beta, "g_init$beta", expected_length = pX, allow_null = FALSE)
+  } else {
+    out <- rep(0, pX)
+    if (pX > 0L) {
+      out[1L] <- .response_beta_init(x, s = s, link = link)
+    }
+    out
+  }
+
+  eta_init <- as.numeric(X %*% beta_init)
+  noise_sd0 <- if (isTRUE(learn_noise)) {
+    .response_raw_residual_scale(x, eta = eta_init, link = link)
+  } else {
+    NA_real_
+  }
+
+  list(
+    theta0 = theta0,
+    beta_init = as.numeric(beta_init),
+    noise_sd0 = as.numeric(noise_sd0),
+    g_init = g_init
+  )
+}
+
 .fit_lgp_laplace_r <- function(x,
                                s,
                                LGP_setup,
@@ -577,19 +621,19 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
   if ("scale" %in% fix_params && (is.null(g_init_input) || is.null(g_init_input$scale))) {
     stop("`fix_params = \"scale\"` requires `g_init$scale`.")
   }
-  if (is.null(g_init)) {
-    g_init <- LGP(scale = 0, beta = rep(0, pX), beta_prec = beta_prec_use)
-  }
-  theta0 <- .check_single_numeric(g_init$scale, "g_init$scale")
-  beta_init <- if (!is.null(beta_fixed_use)) {
-    beta_fixed_use
-  } else if (!is.null(g_init$beta)) {
-    .check_optional_beta_vector(g_init$beta, "g_init$beta", expected_length = pX, allow_null = FALSE)
-  } else {
-    rep(0, pX)
-  }
-  noise_sd0 <- if (isTRUE(learn_noise)) stats::sd(x) else NA_real_
-  if (isTRUE(learn_noise) && (!is.finite(noise_sd0) || noise_sd0 <= 0)) noise_sd0 <- 1
+  init <- .resolve_lgp_initial_state(
+    x = x,
+    X = X,
+    s = if (isTRUE(learn_noise)) NULL else s,
+    g_init = g_init,
+    beta_fixed = beta_fixed_use,
+    beta_prec = beta_prec_use,
+    link = link,
+    learn_noise = learn_noise
+  )
+  theta0 <- init$theta0
+  beta_init <- init$beta_init
+  noise_sd0 <- init$noise_sd0
 
   beta_names <- paste0("beta", seq_len(pX))
   par0 <- c(theta = theta0)
@@ -970,17 +1014,18 @@ ebnm_LGP_generator <- function(LGP_setup,
     betaprec_internal <- if (beta_mode == "empirical_bayes") -1 else beta_prec_use
     tmbdat$betaprec <- if (is.null(betaprec_internal)) -1 else betaprec_internal
 
-    if (is.null(g_init)) {
-      g_init <- LGP(scale = 0, beta = rep(0, pX), beta_prec = beta_prec_use)
-    }
-    theta0 <- .check_numeric_scalar(g_init$scale, "g_init$scale")
-    beta_init <- if (!is.null(beta_fixed_use)) {
-      beta_fixed_use
-    } else if (!is.null(g_init$beta)) {
-      .check_optional_beta_vector(g_init$beta, "g_init$beta", expected_length = pX, allow_null = FALSE)
-    } else {
-      rep(0, pX)
-    }
+    init <- .resolve_lgp_initial_state(
+      x = x,
+      X = tmbdat$X,
+      s = s,
+      g_init = g_init,
+      beta_fixed = beta_fixed_use,
+      beta_prec = beta_prec_use,
+      link = link,
+      learn_noise = FALSE
+    )
+    theta0 <- .check_numeric_scalar(init$theta0, "g_init$scale")
+    beta_init <- init$beta_init
 
     par0 <- list(
       theta = theta0,

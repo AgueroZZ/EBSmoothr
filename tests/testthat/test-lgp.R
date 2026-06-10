@@ -54,6 +54,88 @@ test_that("LGP g_init beta is accepted and stored in the resolved fit state", {
   expect_equal(unname(fit$g_init$beta_prec), 0, tolerance = 1e-10)
 })
 
+test_that("LGP non-identity initialization matches response-scale means", {
+  skip_if_not_installed("TMB")
+
+  t <- seq(0, 1, length.out = 12)
+  s <- rep(c(0.08, 0.16), length.out = length(t))
+  w <- 1 / s^2
+
+  x_log <- exp(0.4 + 0.2 * t)
+  setup_log <- LGP_setup(t = t, num_knots = 6, betaprec = 0, link = "log")
+  fit_log <- ebnm_LGP_generator(setup_log, link = "log", backend = "laplace_fisher")(
+    x_log,
+    s,
+    beta_prec = 0
+  )
+  expect_equal(
+    unname(fit_log$g_init$beta),
+    c(log(stats::weighted.mean(x_log, w = w)), 0),
+    tolerance = 1e-10
+  )
+
+  x_softplus <- .softplus_stable(-0.8 + 2 * t)
+  setup_softplus <- LGP_setup(t = t, num_knots = 6, betaprec = 0, link = "softplus")
+  fit_softplus <- ebnm_LGP_generator(setup_softplus, link = "softplus", backend = "laplace")(
+    x_softplus,
+    s,
+    beta_prec = 0
+  )
+  expect_equal(
+    unname(fit_softplus$g_init$beta),
+    c(.inverse_softplus_stable(stats::weighted.mean(x_softplus, w = w)), 0),
+    tolerance = 1e-10
+  )
+
+  scale_only <- LGP(scale = 0.25)
+  fit_scale_only <- ebnm_LGP_generator(setup_log, link = "log", backend = "laplace_fisher")(
+    x_log,
+    s,
+    g_init = scale_only,
+    beta_prec = 0
+  )
+  expect_equal(fit_scale_only$g_init$scale, 0.25, tolerance = 1e-12)
+  expect_equal(
+    unname(fit_scale_only$g_init$beta),
+    c(log(stats::weighted.mean(x_log, w = w)), 0),
+    tolerance = 1e-10
+  )
+
+  fixed_beta <- c(0.2, -0.1)
+  fit_fixed_beta <- ebnm_LGP_generator(setup_log, link = "log", backend = "laplace_fisher")(
+    x_log,
+    s,
+    beta_fixed = fixed_beta
+  )
+  expect_equal(unname(fit_fixed_beta$g_init$beta), fixed_beta, tolerance = 1e-12)
+})
+
+test_that("LGP learned-noise initialization uses response-scale beta and raw residual noise", {
+  skip_if_not_installed("TMB")
+
+  t <- seq(0, 1, length.out = 10)
+  x <- exp(0.3 + 0.25 * t)
+  setup <- LGP_setup(t = t, num_knots = 6, betaprec = 0, link = "log")
+
+  fit <- eb_smoother(
+    x,
+    s = NULL,
+    family = "lgp",
+    setup = setup,
+    link = "log",
+    backend = "laplace_fisher",
+    beta_prec = 0
+  )
+
+  expect_equal(
+    unname(fit$raw_fit$g_init$beta),
+    c(log(mean(x)), 0),
+    tolerance = 1e-10
+  )
+  expect_true(is.finite(fit$fitted_noise_sd))
+  expect_gt(fit$fitted_noise_sd, 0)
+})
+
 test_that("LGP legacy LGP_setup$betaprec remains a fallback when beta_prec is missing", {
   set.seed(4)
 
