@@ -722,8 +722,10 @@ print.summary.eb_smoother_fit <- function(x, ...) {
                                    beta_prec = NULL,
                                    beta_prec_missing = FALSE,
                                    link = c("identity", "log", "softplus"),
+                                   pc_penalty = NULL,
                                    dll = "EBSmoothr") {
   link <- match.arg(link)
+  pc_penalty <- .resolve_lgp_pc_penalty(pc_penalty)
 
   if (is.null(LGP_setup$X) || is.null(LGP_setup$B) || is.null(LGP_setup$P)) {
     stop("`setup` must contain X, B, and P.")
@@ -744,6 +746,8 @@ print.summary.eb_smoother_fit <- function(x, ...) {
   tmbdat$link_id <- as.integer(link_id_arg)
   tmbdat$learn_noise <- 1L
   tmbdat$model_id <- 0L
+  tmbdat$use_pc_prior <- if (is.null(pc_penalty)) 0L else 1L
+  tmbdat$pc_prior <- .lgp_pc_prior_vector(pc_penalty)
 
   pB <- ncol(tmbdat$B)
   pX <- ncol(tmbdat$X)
@@ -943,6 +947,11 @@ print.summary.eb_smoother_fit <- function(x, ...) {
   class(ll_stepB_laplace) <- "logLik"
 
   log_likelihood <- structure(ll_stepA, class = "logLik")
+  log_likelihood_pc_prior_theta <- if (is.null(pc_penalty)) {
+    NULL
+  } else {
+    .log_pc_prior_lgp_internal(fitted_theta, pc_penalty$scale)
+  }
 
   posterior_sampler <- function(nsamp) {
     nsamp <- .check_single_numeric(nsamp, "nsamp")
@@ -980,11 +989,13 @@ print.summary.eb_smoother_fit <- function(x, ...) {
     log_likelihood_stepB_laplace = ll_stepB_laplace,
     posterior_sampler = posterior_sampler,
     data = .eb_smoother_data_frame(x, rep(fitted_noise_sd, n)),
-    prior_family = "LGP_learned_noise",
+    prior_family = if (is.null(pc_penalty)) "LGP_learned_noise" else "LGP_learned_noise_pc",
     backend = "tmb",
     laplace_implementation = "tmb",
     laplace_curvature = "observed",
     link = link,
+    pc_penalty = pc_penalty,
+    log_likelihood_pc_prior_theta = log_likelihood_pc_prior_theta,
     g_init = LGP(theta0, beta = beta_init, beta_prec = if (beta_mode == "prior_flat") 0 else beta_prec_use)
   )
 }
@@ -1640,8 +1651,13 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
 #'   supplied or otherwise `g_init$beta`. For `"lgp"`, allowed values are
 #'   `"scale"` and `"beta"`; `"scale"` uses `g_init$scale`. `fix_g = TRUE`
 #'   is retained as a shortcut for fixing Matern range/sigma or L-GP scale.
-#' @param pc.penalty Optional Matern PC prior specification. Supported entries
-#'   are `range`, `sigma`, and, when `s = NULL`, `noise`.
+#' @param pc.penalty Optional PC prior specification. For `"matern"`, supported
+#'   entries are `range`, `sigma`, and, when `s = NULL`, `noise`. For `"lgp"`,
+#'   this is an opt-in latent-scale prior specified as
+#'   `list(scale = c(anchor, alpha))` or
+#'   `list(latent_scale = c(anchor, alpha))`, meaning
+#'   `P(exp(-theta / 2) > anchor) = alpha`. The L-GP PC prior regularizes the
+#'   latent process scale but is not a guaranteed convergence fix.
 #' @param penalty_range Initial range anchor for the Matern family when
 #'   `g_init$theta` is missing.
 #' @param alpha Matern SPDE smoothness parameter.
@@ -1794,8 +1810,8 @@ eb_smoother <- function(x,
   if (family == "lgp" && backend %in% c("laplace_r", "laplace_tmb", "inla", "inla_pc")) {
     stop("`backend` values `laplace_r`, `laplace_tmb`, `inla`, and `inla_pc` are only supported for `family = \"matern\"`.")
   }
-  if (family != "matern" && !is.null(pc.penalty)) {
-    stop("`pc.penalty` is only supported for `family = \"matern\"`.")
+  if (!(family %in% c("matern", "lgp")) && !is.null(pc.penalty)) {
+    stop("`pc.penalty` is only supported for `family = \"matern\"` or `family = \"lgp\"`.")
   }
 
   if (family %in% .point_family_names) {
@@ -2743,12 +2759,14 @@ eb_smoother <- function(x,
   if (!(backend_use %in% c("tmb", "laplace", "laplace_fisher"))) {
     stop("Unsupported backend for `family = \"lgp\"`.")
   }
+  pc_penalty_lgp <- .resolve_lgp_pc_penalty(pc.penalty)
 
   if (s_known) {
     fit_fun <- ebnm_LGP_generator(
       LGP_setup = setup,
       link = link,
       backend = if (identical(backend_use, "laplace_fisher")) "laplace_fisher" else if (identical(backend_use, "laplace")) "laplace" else "tmb",
+      pc.penalty = pc_penalty_lgp,
       dll = dll
     )
     fit_args <- list(
@@ -2789,6 +2807,7 @@ eb_smoother <- function(x,
       fix_params = fix_params_use,
       link = link,
       learn_noise = TRUE,
+      pc_penalty = pc_penalty_lgp,
       laplace_curvature = if (identical(backend_use, "laplace_fisher")) "fisher" else "observed"
     )
   } else {
@@ -2800,6 +2819,7 @@ eb_smoother <- function(x,
       beta_prec = beta_prec,
       beta_prec_missing = beta_prec_missing,
       link = link,
+      pc_penalty = pc_penalty_lgp,
       dll = dll
     )
   }

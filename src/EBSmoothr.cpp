@@ -63,6 +63,8 @@ Type objective_function<Type>::operator() ()
     DATA_SCALAR(betaprec);         // beta precision; <=0 => diffuse/no prior
     DATA_INTEGER(link_id);         // 0: identity, 1: exp-link, 2: softplus-link
     DATA_INTEGER(learn_noise);     // 0: use known s, 1: learn one common noise SD
+    DATA_INTEGER(use_pc_prior);    // 0: no PC prior, 1: include latent-scale PC prior
+    DATA_VECTOR(pc_prior);         // latent SD anchor and tail probability
 
     // --------------------
     // parameters
@@ -121,6 +123,14 @@ Type objective_function<Type>::operator() ()
       lp += -Type(0.5) * betaprec * bb;
       lp += Type(0.5) * Type(pX) * log(betaprec) -
         Type(0.5) * Type(pX) * log(Type(2.0) * M_PI);
+    }
+
+    if (use_pc_prior == 1) {
+      Type sd_anchor = pc_prior(0);
+      Type alpha = pc_prior(1);
+      Type lambda = -log(alpha) / sd_anchor;
+      Type latent_sd = exp(Type(-0.5) * theta);
+      lp += log(Type(0.5) * lambda) - lambda * latent_sd - Type(0.5) * theta;
     }
 
     return -(ll + lp);

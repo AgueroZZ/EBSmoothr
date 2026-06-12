@@ -101,8 +101,13 @@ supplied or otherwise \code{g_init$beta}. For \code{"lgp"}, allowed values are
 \code{"scale"} and \code{"beta"}; \code{"scale"} uses \code{g_init$scale}. \code{fix_g = TRUE}
 is retained as a shortcut for fixing Matern range/sigma or L-GP scale.}
 
-\item{pc.penalty}{Optional Matern PC prior specification. Supported entries
-are \code{range}, \code{sigma}, and, when \code{s = NULL}, \code{noise}.}
+\item{pc.penalty}{Optional PC prior specification. For \code{"matern"}, supported
+entries are \code{range}, \code{sigma}, and, when \code{s = NULL}, \code{noise}. For \code{"lgp"},
+this is an opt-in latent-scale prior specified as
+\code{list(scale = c(anchor, alpha))} or
+\code{list(latent_scale = c(anchor, alpha))}, meaning
+\code{P(exp(-theta / 2) > anchor) = alpha}. The L-GP PC prior regularizes the
+latent process scale but is not a guaranteed convergence fix.}
 
 \item{penalty_range}{Initial range anchor for the Matern family when
 \code{g_init$theta} is missing.}

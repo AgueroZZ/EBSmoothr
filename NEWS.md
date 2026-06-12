@@ -1,3 +1,25 @@
+# EBSmoothr 0.2.6
+
+## New Features
+
+- Added opt-in PC prior support for L-GP smoothers through
+  `pc.penalty = list(scale = c(anchor, alpha))` or the explicit alias
+  `pc.penalty = list(latent_scale = c(anchor, alpha))`. The prior is placed on
+  the latent process standard deviation `sigma_u = exp(-theta / 2)` with
+  `P(sigma_u > anchor) = alpha`; omitting `alpha` defaults to `0.5`.
+- The L-GP PC prior is available through both `ebnm_LGP_generator()` and
+  `eb_smoother(family = "lgp")`, including fixed-noise and learned-noise L-GP
+  fits. The prior contributes to the optimized L-GP objective and returned fits
+  include `pc_penalty`, `log_likelihood_pc_prior_theta`, and PC-specific
+  `prior_family` labels.
+
+## Validation
+
+- Added L-GP tests confirming that the PC prior affects fitted latent scale and
+  posterior smoothness in the expected direction across anchor and alpha
+  choices, and that `ebnm_LGP_generator()` and `eb_smoother()` agree for the
+  same prior specification.
+
 # EBSmoothr 0.2.5
 
 ## Performance

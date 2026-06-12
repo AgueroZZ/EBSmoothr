@@ -479,6 +479,65 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
   ))
 }
 
+.resolve_lgp_pc_penalty_component <- function(component, nm) {
+  if (!is.numeric(component) || anyNA(component) || !length(component) %in% c(1L, 2L)) {
+    stop(nm, " must be a numeric vector of length 1 or 2.")
+  }
+  anchor <- as.numeric(component[1L])
+  alpha <- if (length(component) == 1L) 0.5 else as.numeric(component[2L])
+  if (!is.finite(anchor) || anchor <= 0) {
+    stop(nm, " anchor must be a single positive finite number.")
+  }
+  if (!is.finite(alpha) || alpha <= 0 || alpha >= 1) {
+    stop(nm, " alpha must satisfy 0 < alpha < 1.")
+  }
+  c(anchor = anchor, alpha = alpha)
+}
+
+.resolve_lgp_pc_penalty <- function(pc.penalty) {
+  if (is.null(pc.penalty)) return(NULL)
+  if (!is.list(pc.penalty)) {
+    stop("`pc.penalty` must be NULL or a named list for L-GP fits.")
+  }
+
+  nms <- names(pc.penalty)
+  if (is.null(nms)) nms <- rep("", length(pc.penalty))
+  if (any(nms == "")) {
+    stop("`pc.penalty` entries must be named.")
+  }
+
+  supported_names <- c("scale", "latent_scale")
+  if (!all(nms %in% supported_names)) {
+    stop(
+      "L-GP `pc.penalty` only supports `scale` or `latent_scale` entries."
+    )
+  }
+  if (all(supported_names %in% nms)) {
+    stop("Use only one of `pc.penalty$scale` or `pc.penalty$latent_scale`.")
+  }
+
+  component_name <- intersect(supported_names, nms)[1L]
+  list(
+    scale = .resolve_lgp_pc_penalty_component(
+      pc.penalty[[component_name]],
+      paste0("pc.penalty$", component_name)
+    )
+  )
+}
+
+.log_pc_prior_lgp_internal <- function(theta, scale_spec) {
+  if (is.null(scale_spec)) return(0)
+  anchor <- as.numeric(scale_spec[["anchor"]])
+  alpha <- as.numeric(scale_spec[["alpha"]])
+  lambda <- -log(alpha) / anchor
+  log(lambda / 2) - lambda * exp(-0.5 * theta) - 0.5 * theta
+}
+
+.lgp_pc_prior_vector <- function(pc_penalty) {
+  if (is.null(pc_penalty)) return(c(1, 0.5))
+  unname(as.numeric(pc_penalty$scale[c("anchor", "alpha")]))
+}
+
 .lgp_laplace_inner_objective <- function(x,
                                          s,
                                          B,
@@ -491,6 +550,7 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
                                          beta_prec = NULL,
                                          beta_init = NULL,
                                          initial_mode = NULL,
+                                         pc_penalty = NULL,
                                          link = c("identity", "log", "softplus"),
                                          laplace_curvature = c("observed", "fisher")) {
   link <- match.arg(link)
@@ -571,13 +631,22 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
     eta_design <- B
   }
   log_joint <- -obs$nll + log_prior
+  log_pc_prior_theta <- if (is.null(pc_penalty)) {
+    NULL
+  } else {
+    .log_pc_prior_lgp_internal(theta, pc_penalty$scale)
+  }
   log_marginal <- log_joint + 0.5 * length(z_mode) * log(2 * pi) - 0.5 * H_factor$logdet
+  if (!is.null(log_pc_prior_theta)) {
+    log_marginal <- log_marginal + log_pc_prior_theta
+  }
   eta_var <- .compute_diag_A_Qinv_At(eta_design, H_factor)
   response <- .lgp_response_moments_from_eta(eta_mode, eta_var, link = link)
 
   list(
     log_marginal = as.numeric(log_marginal),
     log_joint = as.numeric(log_joint),
+    log_pc_prior_theta = log_pc_prior_theta,
     mode = z_mode,
     precision = H,
     precision_factor = H_factor,
@@ -692,9 +761,11 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
                                fix_params = character(),
                                link = c("identity", "log", "softplus"),
                                learn_noise = FALSE,
+                               pc_penalty = NULL,
                                laplace_curvature = c("observed", "fisher")) {
   link <- match.arg(link)
   laplace_curvature <- match.arg(laplace_curvature)
+  pc_penalty <- .resolve_lgp_pc_penalty(pc_penalty)
   if (isTRUE(fix_g)) fix_params <- unique(c(fix_params, "scale"))
   x <- as.numeric(x)
   n <- length(x)
@@ -771,6 +842,7 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
       beta_prec = beta_prec_use,
       beta_init = beta_init,
       initial_mode = last_inner_mode,
+      pc_penalty = pc_penalty,
       link = link,
       laplace_curvature = laplace_curvature
     )
@@ -833,8 +905,13 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
     laplace_implementation = "r",
     laplace_curvature = laplace_curvature,
     link = link,
+    pc_penalty = pc_penalty,
+    log_likelihood_pc_prior_theta = objective$log_pc_prior_theta,
     g_init = LGP(theta0, beta = beta_init, beta_prec = if (identical(beta_mode, "prior_flat")) 0 else beta_prec_use)
   )
+  if (!is.null(pc_penalty)) {
+    out$prior_family <- paste0(out$prior_family, "_pc")
+  }
   if (isTRUE(learn_noise)) {
     out$fitted_noise_sd <- as.numeric(objective$fitted_noise_sd)
   }
@@ -952,6 +1029,13 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
 #'   \code{link = "softplus"}. \code{"laplace"} uses the observed-Hessian
 #'   Laplace backend. \code{"laplace_fisher"} is available for
 #'   \code{link = "log"} and \code{link = "softplus"}.
+#' @param pc.penalty Optional L-GP PC prior specification. Supply
+#'   \code{list(scale = c(anchor, alpha))} or
+#'   \code{list(latent_scale = c(anchor, alpha))} to place an exponential prior
+#'   on \eqn{\sigma_u = \exp(-\theta / 2)} such that
+#'   \eqn{P(\sigma_u > anchor) = alpha}. If \code{alpha} is omitted, it defaults
+#'   to \code{0.5}. This is an opt-in prior specification for L-GP scale
+#'   regularization, not a guaranteed convergence fix.
 #' @param dll Compiled TMB DLL name (default \code{"EBSmoothr"}).
 #'
 #' @return A function that returns an object of class \code{"ebnm"} (and \code{"list"}).
@@ -965,9 +1049,11 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
 ebnm_LGP_generator <- function(LGP_setup,
                                link = c("identity", "log", "softplus"),
                                backend = c("auto", "tmb", "laplace", "laplace_fisher"),
+                               pc.penalty = NULL,
                                dll = "EBSmoothr") {
   link <- match.arg(link)
   backend <- match.arg(backend)
+  pc_penalty <- .resolve_lgp_pc_penalty(pc.penalty)
   backend_use <- if (identical(backend, "auto")) {
     if (identical(link, "log")) "laplace_fisher" else if (identical(link, "softplus")) "laplace" else "tmb"
   } else {
@@ -1056,6 +1142,8 @@ ebnm_LGP_generator <- function(LGP_setup,
     tmbdat$link_id <- as.integer(link_id_arg)
     tmbdat$learn_noise <- 0L
     tmbdat$model_id <- 0L
+    tmbdat$use_pc_prior <- if (is.null(pc_penalty)) 0L else 1L
+    tmbdat$pc_prior <- .lgp_pc_prior_vector(pc_penalty)
 
     pB <- ncol(tmbdat$B)
     pX <- ncol(tmbdat$X)
@@ -1092,6 +1180,7 @@ ebnm_LGP_generator <- function(LGP_setup,
         fix_params = fix_params_use,
         link = link,
         learn_noise = FALSE,
+        pc_penalty = pc_penalty,
         laplace_curvature = if (identical(backend_use, "laplace_fisher")) "fisher" else "observed"
       )
       return(structure(fit, class = c("list", "ebnm")))
@@ -1277,6 +1366,11 @@ ebnm_LGP_generator <- function(LGP_setup,
 
     log_likelihood <- if (is.finite(ll_stepA)) ll_stepA else as.numeric(ll_stepB_laplace)
     class(log_likelihood) <- "logLik"
+    log_likelihood_pc_prior_theta <- if (is.null(pc_penalty)) {
+      NULL
+    } else {
+      .log_pc_prior_lgp_internal(fitted_theta, pc_penalty$scale)
+    }
 
     posterior_sampler <- function(nsamp) {
       samps <- LaplacesDemon::rmvnp(n = nsamp, mu = as.numeric(optB$par), Omega = as.matrix(prec))
@@ -1310,11 +1404,13 @@ ebnm_LGP_generator <- function(LGP_setup,
         log_likelihood_stepB_laplace = ll_stepB_laplace,
         posterior_sampler = posterior_sampler,
         data = data.frame(x = x, s = s),
-        prior_family = "LGP",
+        prior_family = if (is.null(pc_penalty)) "LGP" else "LGP_pc",
         backend = if (identical(backend_use, "laplace")) "laplace" else "tmb",
         laplace_implementation = "tmb",
         laplace_curvature = "observed",
         link = link,
+        pc_penalty = pc_penalty,
+        log_likelihood_pc_prior_theta = log_likelihood_pc_prior_theta,
         g_init = LGP(theta0, beta = beta_init, beta_prec = if (beta_mode == "prior_flat") 0 else beta_prec_use)
       ),
       class = c("list", "ebnm")

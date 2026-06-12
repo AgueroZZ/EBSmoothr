@@ -252,6 +252,116 @@ test_that("LGP softplus posterior moments match empirical moments from posterior
   expect_lt(max(abs(draw_var - fit$posterior$var)), var_tol)
 })
 
+test_that("LGP PC prior penalizes latent scale", {
+  skip_if_not_installed("TMB")
+  set.seed(11)
+
+  t <- seq(0, 1, length.out = 28)
+  s <- rep(0.08, length(t))
+  x <- 0.25 + sin(2 * pi * t) + rnorm(length(t), sd = s)
+  setup <- LGP_setup(t = t, num_knots = 8, betaprec = 0)
+  pc <- list(scale = c(0.4, 0.25))
+
+  fit_pc <- ebnm_LGP_generator(setup, pc.penalty = pc)(x, s)
+  fit_alias <- ebnm_LGP_generator(setup, pc.penalty = list(latent_scale = c(0.4, 0.25)))(x, s)
+
+  expect_equal(fit_pc$prior_family, "LGP_pc")
+  expect_equal(unname(fit_pc$pc_penalty$scale), c(0.4, 0.25), tolerance = 1e-12)
+  expect_equal(unname(fit_alias$pc_penalty$scale), c(0.4, 0.25), tolerance = 1e-12)
+  expect_true(is.finite(fit_pc$log_likelihood_pc_prior_theta))
+  expect_equal(
+    fit_pc$log_likelihood_pc_prior_theta,
+    .log_pc_prior_lgp_internal(fit_pc$fitted_g$scale, fit_pc$pc_penalty$scale),
+    tolerance = 1e-10
+  )
+
+  g_fixed <- LGP(scale = 0.2, beta = c(0, 0), beta_prec = 0)
+  fit_plain_fixed <- ebnm_LGP_generator(setup, backend = "laplace")(
+    x,
+    s,
+    g_init = g_fixed,
+    fix_params = "scale",
+    beta_prec = 0
+  )
+  fit_pc_fixed <- ebnm_LGP_generator(setup, backend = "laplace", pc.penalty = pc)(
+    x,
+    s,
+    g_init = g_fixed,
+    fix_params = "scale",
+    beta_prec = 0
+  )
+  expect_equal(
+    as.numeric(fit_pc_fixed$log_likelihood) - as.numeric(fit_plain_fixed$log_likelihood),
+    .log_pc_prior_lgp_internal(0.2, fit_pc_fixed$pc_penalty$scale),
+    tolerance = 1e-8
+  )
+
+  fit_wrap <- eb_smoother(x, s = s, family = "lgp", setup = setup, pc.penalty = pc)
+  expect_equal(fit_wrap$prior_family, "LGP_pc")
+  expect_equal(unname(fit_wrap$pc_penalty$scale), c(0.4, 0.25), tolerance = 1e-12)
+
+  expect_error(
+    ebnm_LGP_generator(setup, pc.penalty = list(range = c(0.4, 0.25))),
+    "only supports"
+  )
+  expect_error(
+    eb_smoother(x, s = s, family = "constant", pc.penalty = pc),
+    "only supported"
+  )
+})
+
+test_that("LGP PC prior smoothness responds to anchor and alpha", {
+  skip_if_not_installed("TMB")
+  set.seed(2026)
+
+  t <- seq(0, 1, length.out = 45)
+  s <- rep(0.18, length(t))
+  signal <- 0.5 + sin(2 * pi * t) + 0.35 * sin(10 * pi * t)
+  x <- signal + rnorm(length(t), sd = s)
+  setup <- LGP_setup(t = t, num_knots = 12, betaprec = 0)
+  posterior_roughness <- function(mu) sum(diff(mu, differences = 2)^2)
+  fit_metrics <- function(pc) {
+    fit_ebnm <- ebnm_LGP_generator(setup, pc.penalty = pc)(x, s)
+    fit_smoother <- eb_smoother(x, s = s, family = "lgp", setup = setup, pc.penalty = pc)
+
+    expect_equal(fit_ebnm$posterior$mean, fit_smoother$posterior$mean, tolerance = 1e-10)
+    expect_equal(fit_ebnm$fitted_g$scale, fit_smoother$fitted_g$scale, tolerance = 1e-10)
+
+    c(
+      latent_sd = exp(-0.5 * fit_ebnm$fitted_g$scale),
+      roughness = posterior_roughness(fit_ebnm$posterior$mean)
+    )
+  }
+
+  anchor_metrics <- vapply(
+    list(
+      wide = list(scale = c(5, 0.1)),
+      medium = list(scale = c(0.5, 0.1)),
+      tight = list(scale = c(0.03, 0.1))
+    ),
+    fit_metrics,
+    numeric(2)
+  )
+  expect_lt(anchor_metrics["latent_sd", "tight"], anchor_metrics["latent_sd", "medium"])
+  expect_lt(anchor_metrics["latent_sd", "medium"], anchor_metrics["latent_sd", "wide"])
+  expect_lt(anchor_metrics["roughness", "tight"], anchor_metrics["roughness", "medium"])
+  expect_lt(anchor_metrics["roughness", "medium"], anchor_metrics["roughness", "wide"])
+
+  alpha_metrics <- vapply(
+    list(
+      weak = list(scale = c(0.5, 0.9)),
+      medium = list(scale = c(0.5, 0.5)),
+      strong = list(scale = c(0.5, 0.02))
+    ),
+    fit_metrics,
+    numeric(2)
+  )
+  expect_lt(alpha_metrics["latent_sd", "strong"], alpha_metrics["latent_sd", "medium"])
+  expect_lt(alpha_metrics["latent_sd", "medium"], alpha_metrics["latent_sd", "weak"])
+  expect_lt(alpha_metrics["roughness", "strong"], alpha_metrics["roughness", "medium"])
+  expect_lt(alpha_metrics["roughness", "medium"], alpha_metrics["roughness", "weak"])
+})
+
 test_that("LGP fix_params supports scale and beta fixing", {
   set.seed(7)
 

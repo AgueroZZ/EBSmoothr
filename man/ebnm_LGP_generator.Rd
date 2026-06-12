@@ -8,6 +8,7 @@ ebnm_LGP_generator(
   LGP_setup,
   link = c("identity", "log", "softplus"),
   backend = c("auto", "tmb", "laplace", "laplace_fisher"),
+  pc.penalty = NULL,
   dll = "EBSmoothr"
 )
 }
@@ -25,6 +26,14 @@ ebnm_LGP_generator(
 \code{link = "softplus"}. \code{"laplace"} uses the observed-Hessian
 Laplace backend. \code{"laplace_fisher"} is available for
 \code{link = "log"} and \code{link = "softplus"}.}
+
+\item{pc.penalty}{Optional L-GP PC prior specification. Supply
+\code{list(scale = c(anchor, alpha))} or
+\code{list(latent_scale = c(anchor, alpha))} to place an exponential prior
+on \eqn{\sigma_u = \exp(-\theta / 2)} such that
+\eqn{P(\sigma_u > anchor) = alpha}. If \code{alpha} is omitted, it defaults
+to \code{0.5}. This is an opt-in prior specification for L-GP scale
+regularization, not a guaranteed convergence fix.}
 
 \item{dll}{Compiled TMB DLL name (default \code{"EBSmoothr"}).}
 }
