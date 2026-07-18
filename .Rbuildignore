@@ -1,5 +1,7 @@
 ^.*\.Rproj$
 ^\.Rproj\.user$
+^\.git$
+^\.github$
 ^\.DS_Store$
 ^\.Rhistory$
 ^R/\.DS_Store$
@@ -9,3 +11,5 @@
 ^\.positai$
 ^\.claude$
 ^bench$
+^LICENSE\.md$
+^sanity_check.*\.R$

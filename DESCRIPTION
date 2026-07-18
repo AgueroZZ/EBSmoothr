@@ -1,6 +1,6 @@
 Package: EBSmoothr
 Type: Package
-Title: Empirical Bayes Smoothing with L-GP and Matern Priors
+Title: Empirical Bayes Smoothing with Continuous and Binary Markov Priors
 Version: 0.2.6
 Authors@R: c(
     person(
@@ -22,6 +22,8 @@ Description: Provides empirical Bayes smoothers for Gaussian means using
     limit, spatial scoring wrappers, TMB backends for L-GP and Matern Laplace
     models, and exact Gaussian / INLA-SPDE backends for Matern models.
 License: MIT + file LICENSE
+URL: https://github.com/AgueroZZ/EBSmoothr
+BugReports: https://github.com/AgueroZZ/EBSmoothr/issues
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.3
