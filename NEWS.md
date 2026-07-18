@@ -2,6 +2,15 @@
 
 ## New Features
 
+- Added `BinaryMarkov()` and `ebnm_binary_markov()` for an exact ordered
+  intron/exon model with symmetric state transitions. The solver supports a
+  fixed transition probability or empirical-Bayes numerical search using exact
+  marginal-likelihood evaluations, and returns forward-backward state
+  marginals, pairwise transition posteriors, a Viterbi path, and exact posterior
+  samples. Because the likelihood need not be concave, the numerical search is
+  not guaranteed to find the global maximizer. A flip probability of `0.5`
+  reduces exactly to the iid Bernoulli(0.5) binary baseline, so the same solver
+  covers both the symmetric Markov model and its equal-probability iid limit.
 - Added opt-in PC prior support for L-GP smoothers through
   `pc.penalty = list(scale = c(anchor, alpha))` or the explicit alias
   `pc.penalty = list(latent_scale = c(anchor, alpha))`. The prior is placed on

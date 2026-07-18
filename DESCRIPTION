@@ -18,9 +18,9 @@ Description: Provides empirical Bayes smoothers for Gaussian means using
     interface that can also learn one common observation noise SD when
     standard errors are unknown. Supports identity, log, and softplus
     response links, constant Gaussian baselines, point-mass reference
-    families, spatial scoring wrappers, TMB backends for L-GP and Matern
-    Laplace models, and exact Gaussian / INLA-SPDE backends for Matern
-    models.
+    families, symmetric Markov binary normal-means models with an exact iid
+    limit, spatial scoring wrappers, TMB backends for L-GP and Matern Laplace
+    models, and exact Gaussian / INLA-SPDE backends for Matern models.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
