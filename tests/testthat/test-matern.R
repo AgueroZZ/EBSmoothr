@@ -757,18 +757,45 @@ test_that("Public Matern Laplace backends do not fall back to R reference", {
   loc <- seq(0, 1, length.out = 6)
   s <- rep(0.1, length(loc))
   x <- exp(0.1 + 0.2 * sin(2 * pi * loc))
+  g0 <- Matern(theta = log(0.5), sigma = 1)
 
+  # Fixing exactly one of `range` / `sigma` is still unsupported by the TMB
+  # objective, and must error rather than silently use the R reference.
   expect_error(
-    ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace", alpha = 1)(x, s),
+    ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace")(
+      x, s, g_init = g0, fix_params = "range"
+    ),
     "require a successful TMB fit"
   )
   expect_error(
-    ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace_fisher", alpha = 1)(x, s),
+    ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace_fisher")(
+      x, s, g_init = g0, fix_params = "sigma"
+    ),
     "require a successful TMB fit"
   )
 
   fit_r <- ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace_r", alpha = 1)(x, s)
   expect_equal(fit_r$laplace_implementation, "r")
+})
+
+test_that("TMB Laplace backends accept any integer alpha > d / 2", {
+  loc <- seq(0, 1, length.out = 12)
+  s <- rep(0.1, length(loc))
+  x <- exp(0.1 + 0.2 * sin(2 * pi * loc))
+
+  for (a in c(1, 2, 3)) {
+    fit <- ebnm_Matern_generator(locations = loc, link = "log", backend = "laplace", alpha = a)(x, s)
+    expect_true(is.finite(as.numeric(fit$log_likelihood)))
+    expect_length(fit$posterior$mean, length(loc))
+  }
+})
+
+test_that("Matern_setup validates the smoothness order", {
+  loc <- seq(0, 1, length.out = 8)
+  expect_error(Matern_setup(loc, alpha = 1.5), "must be an integer")
+  expect_error(Matern_setup(loc, alpha = 0), "positive integer")
+  expect_error(Matern_setup(cbind(loc, loc), alpha = 1), "alpha > d / 2")
+  expect_error(Matern_setup(loc, alpha = 99), "at most")
 })
 
 test_that("Selected-inverse variance helper matches solve reference", {
@@ -1501,16 +1528,14 @@ test_that("Matern softplus inlabru backend agrees with Laplace (s = NULL, eb_smo
   expect_lt(max(abs(fit_bru$posterior$mean - fit_lap$posterior$mean)), 0.20)
 })
 
-test_that("direct SPDE precision assembly matches INLA across hyperparameters", {
+test_that("FEM precision assembly matches INLA for the alpha INLA supports", {
   skip_if_not_installed("INLA")
 
   loc <- as.matrix(expand.grid(
     x = seq(0, 1, length.out = 5),
     y = seq(0, 1, length.out = 5)
   ))
-  setup <- Matern_setup(locations = loc, max.edge = 0.6)
-  ctx <- attr(setup$spde_template, "EBSmoothr_direct_ctx", exact = TRUE)
-  expect_false(is.null(ctx))
+  setup <- Matern_setup(locations = loc, max.edge = 0.6, alpha = 2)
 
   for (pars in list(c(log(0.3), log(0.5)), c(log(1.2), log(2)))) {
     pr <- EBSmoothr:::.matern_precision_from_log_params(
@@ -1523,39 +1548,101 @@ test_that("direct SPDE precision assembly matches INLA across hyperparameters", 
     theta_spde <- EBSmoothr:::.matern_spde_theta_from_log_range_log_sigma(
       pars[1], pars[2], setup$alpha, setup$d
     )
+    spde_ref <- suppressWarnings(
+      INLA::inla.spde2.matern(mesh = setup$mesh, alpha = setup$alpha)
+    )
     Q_ref <- Matrix::forceSymmetric(Matrix::Matrix(
-      INLA::inla.spde2.precision(setup$spde_template, theta = theta_spde),
+      INLA::inla.spde2.precision(spde_ref, theta = theta_spde),
       sparse = TRUE
     ))
-    expect_lt(
-      max(abs(pr$Q - Q_ref)),
-      1e-8 * max(abs(Q_ref@x))
-    )
+    expect_lt(max(abs(pr$Q - Q_ref)), 1e-8 * max(abs(Q_ref@x)))
     expect_equal(
       pr$Q_factor$logdet,
       as.numeric(Matrix::determinant(Q_ref, logarithm = TRUE)$modulus),
       tolerance = 1e-8
     )
   }
+})
 
-  # Templates without the precomputed context fall back to INLA.
-  template_plain <- setup$spde_template
-  attr(template_plain, "EBSmoothr_direct_ctx") <- NULL
-  pr_fallback <- EBSmoothr:::.matern_precision_from_log_params(
-    spde_template = template_plain,
-    alpha = setup$alpha,
-    d = setup$d,
-    log_range = log(0.7),
-    log_sigma = log(1.1)
+test_that("FEM precision matches the Lindgren-Rue-Lindstrom recursion for integer alpha", {
+  # Independent reference: Q_1 = K, Q_2 = K C^-1 K,
+  # Q_alpha = K C^-1 Q_{alpha-2} C^-1 K with K = kappa^2 C + G.
+  recursion_Q <- function(mesh, alpha, kappa, tau) {
+    fem <- suppressWarnings(fmesher::fm_fem(mesh, order = 1))
+    C <- Matrix::forceSymmetric(fem$c0)
+    G <- Matrix::forceSymmetric(fem$g1)
+    Cinv <- Matrix::Diagonal(x = 1 / Matrix::diag(C))
+    K <- kappa^2 * C + G
+    Qs <- vector("list", alpha)
+    Qs[[1]] <- K
+    if (alpha >= 2) Qs[[2]] <- K %*% Cinv %*% K
+    for (a in seq_len(alpha)[-(1:2)]) Qs[[a]] <- K %*% Cinv %*% Qs[[a - 2]] %*% Cinv %*% K
+    tau^2 * Qs[[alpha]]
+  }
+
+  cases <- list(
+    list(loc = seq(0, 10, length.out = 40), d = 1, alphas = 1:4),
+    list(loc = as.matrix(expand.grid(x = seq(0, 1, length.out = 5),
+                                     y = seq(0, 1, length.out = 5))),
+         d = 2, alphas = 2:4)
   )
-  pr_direct <- EBSmoothr:::.matern_precision_from_log_params(
-    spde_template = setup$spde_template,
-    alpha = setup$alpha,
-    d = setup$d,
-    log_range = log(0.7),
-    log_sigma = log(1.1)
+
+  for (cs in cases) {
+    for (alpha in cs$alphas) {
+      setup <- Matern_setup(locations = cs$loc, max.edge = 0.6, alpha = alpha)
+      for (pars in list(c(log(0.4), log(0.7)), c(log(2), log(1.5)))) {
+        pr <- EBSmoothr:::.matern_precision_from_log_params(
+          spde_template = setup$spde_template,
+          alpha = setup$alpha,
+          d = setup$d,
+          log_range = pars[1],
+          log_sigma = pars[2]
+        )
+        tk <- EBSmoothr:::.matern_tau_from_range_sigma(
+          range = exp(pars[1]), sigma = exp(pars[2]), alpha = alpha, d = cs$d
+        )
+        Q_ref <- recursion_Q(setup$mesh, alpha, tk$kappa, tk$tau)
+        expect_lt(
+          max(abs(pr$Q - Q_ref)),
+          1e-7 * max(abs(as(Q_ref, "CsparseMatrix")@x)),
+          label = paste0("d=", cs$d, " alpha=", alpha)
+        )
+      }
+    }
+  }
+})
+
+test_that("fmesher mesh and projector reproduce the INLA construction", {
+  skip_if_not_installed("INLA")
+
+  loc1 <- sort(stats::runif(30))
+  st1 <- Matern_setup(loc1)
+  m1 <- INLA::inla.mesh.1d(loc = loc1, max.edge = diff(range(loc1)) / 10)
+  expect_equal(st1$mesh$n, m1$n)
+  expect_lt(max(abs(as.matrix(st1$A) -
+                    as.matrix(INLA::inla.spde.make.A(mesh = m1, loc = loc1)))), 1e-12)
+
+  loc2 <- as.matrix(expand.grid(x = seq(0, 1, length.out = 6),
+                                y = seq(0, 1, length.out = 5)))
+  st2 <- Matern_setup(loc2, max.edge = c(0.2, 0.6))
+  m2 <- suppressWarnings(INLA::inla.mesh.2d(loc = loc2, max.edge = c(0.2, 0.6)))
+  expect_equal(st2$mesh$n, m2$n)
+  expect_lt(max(abs(as.matrix(st2$A) -
+                    as.matrix(INLA::inla.spde.make.A(mesh = m2, loc = loc2)))), 1e-12)
+})
+
+test_that("the exact objective rejects numerically singular precisions", {
+  s <- rep(0.2, 5)
+  expect_error(
+    EBSmoothr:::.exact_matern_assert_loglik_valid(1e30, s),
+    "exceeds its theoretical upper bound"
   )
-  expect_lt(max(abs(pr_fallback$Q - pr_direct$Q)), 1e-8 * max(abs(pr_direct$Q@x)))
+  expect_error(
+    EBSmoothr:::.exact_matern_assert_loglik_valid(NaN, s),
+    "not finite"
+  )
+  bound <- EBSmoothr:::.exact_matern_loglik_upper_bound(s)
+  expect_silent(EBSmoothr:::.exact_matern_assert_loglik_valid(bound - 1, s))
 })
 
 test_that("sparse SPD factorization cache reuses symbolic analyses correctly", {

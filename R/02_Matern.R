@@ -55,34 +55,30 @@ utils::globalVariables(".scale_w")
 }
 
 .build_mesh_A <- function(loc_mat, max.edge = NULL) {
-  .with_quiet_inla_defaults({
-    d <- ncol(loc_mat)
+  d <- ncol(loc_mat)
 
-    if (d == 1L) {
-      loc1 <- as.numeric(loc_mat[, 1])
-      if (is.null(max.edge)) {
-        rr <- range(loc1, finite = TRUE)
-        max.edge <- diff(rr) / 10
-        if (!is.finite(max.edge) || max.edge <= 0) max.edge <- 1
-      }
-      mesh <- INLA::inla.mesh.1d(loc = loc1, max.edge = max.edge)
-      A <- INLA::inla.spde.make.A(mesh = mesh, loc = loc1)
-      return(list(mesh = mesh, A = Matrix::Matrix(A, sparse = TRUE)))
-    }
+  if (d == 1L) {
+    loc1 <- as.numeric(loc_mat[, 1])
+    # `max.edge` is accepted for backward compatibility but has no effect in
+    # one dimension: the mesh knots are exactly the (sorted, unique) observed
+    # locations. INLA's `inla.mesh.1d` behaved the same way.
+    mesh <- fmesher::fm_mesh_1d(loc = loc1)
+    A <- fmesher::fm_basis(mesh, loc = loc1)
+    return(list(mesh = mesh, A = Matrix::Matrix(A, sparse = TRUE)))
+  }
 
-    if (is.null(max.edge)) {
-      ranges <- apply(loc_mat, 2, function(z) diff(range(z, finite = TRUE)))
-      inner_edge <- min(ranges) / 10
-      if (!is.finite(inner_edge) || inner_edge <= 0) inner_edge <- 1
-      max.edge <- c(inner_edge, 3 * inner_edge)
-    }
-    if (length(max.edge) == 1L) max.edge <- c(max.edge, max.edge)
-    if (length(max.edge) != 2L) stop("For d = 2, max.edge must be NULL, length-1, or length-2.")
+  if (is.null(max.edge)) {
+    ranges <- apply(loc_mat, 2, function(z) diff(range(z, finite = TRUE)))
+    inner_edge <- min(ranges) / 10
+    if (!is.finite(inner_edge) || inner_edge <= 0) inner_edge <- 1
+    max.edge <- c(inner_edge, 3 * inner_edge)
+  }
+  if (length(max.edge) == 1L) max.edge <- c(max.edge, max.edge)
+  if (length(max.edge) != 2L) stop("For d = 2, max.edge must be NULL, length-1, or length-2.")
 
-    mesh <- INLA::inla.mesh.2d(loc = loc_mat, max.edge = max.edge)
-    A <- INLA::inla.spde.make.A(mesh = mesh, loc = loc_mat)
-    list(mesh = mesh, A = Matrix::Matrix(A, sparse = TRUE))
-  })
+  mesh <- fmesher::fm_mesh_2d_inla(loc = loc_mat, max.edge = max.edge)
+  A <- fmesher::fm_basis(mesh, loc = loc_mat)
+  list(mesh = mesh, A = Matrix::Matrix(A, sparse = TRUE))
 }
 
 .check_single_numeric <- function(z, nm) {
@@ -156,7 +152,14 @@ utils::globalVariables(".scale_w")
     if (is.null(pc_penalty)) {
       stop("`backend = \"inla_pc\"` requires `pc.penalty`; use `backend = \"inla\"` for unpenalized INLA fits.")
     }
+    .require_inla("`backend = \"inla_pc\"`")
     return("inla")
+  }
+  if (identical(backend, "inla")) {
+    .require_inla("`backend = \"inla\"`")
+  }
+  if (identical(backend, "inlabru")) {
+    .require_inla("`backend = \"inlabru\"`")
   }
   backend
 }
@@ -203,100 +206,18 @@ utils::globalVariables(".scale_w")
   c(log(ts$tau), log(ts$kappa))
 }
 
-# Precomputed context for assembling the stationary SPDE precision directly
-# from the template's M0/M1/M2 matrices without calling
-# INLA::inla.spde2.precision on every hyperparameter evaluation. The three
-# component matrices are aligned once onto the union sparsity pattern so a
-# precision build is just a scalar combination of cached x-slots. Returns NULL
-# whenever the template is not a plain stationary two-parameter model; callers
-# must then fall back to INLA.
-.matern_spde_direct_ctx <- function(spde_template) {
-  p <- tryCatch(spde_template$param.inla, error = function(e) NULL)
-  if (is.null(p)) return(NULL)
-  if (!all(c("M0", "M1", "M2", "B0", "B1", "B2", "n.theta", "transform") %in% names(p))) {
-    return(NULL)
-  }
-  if (!identical(as.integer(p$n.theta), 2L)) return(NULL)
-  if (!is.character(p$transform) || length(p$transform) != 1L) return(NULL)
-
-  rows_constant <- function(B) {
-    B <- as.matrix(B)
-    if (ncol(B) != 3L || nrow(B) < 1L) return(NULL)
-    for (j in seq_len(ncol(B))) {
-      if (any(B[, j] != B[1L, j])) return(NULL)
-    }
-    as.numeric(B[1L, ])
-  }
-  b0 <- rows_constant(p$B0)
-  b1 <- rows_constant(p$B1)
-  b2 <- rows_constant(p$B2)
-  if (is.null(b0) || is.null(b1) || is.null(b2)) return(NULL)
-
-  to_sym <- function(M) {
-    M <- Matrix::forceSymmetric(as(Matrix::Matrix(M, sparse = TRUE), "CsparseMatrix"))
-    as(M, "CsparseMatrix")
-  }
-  out <- tryCatch({
-    M0 <- to_sym(p$M0)
-    M1s <- to_sym(p$M1 + Matrix::t(p$M1))
-    M2 <- to_sym(p$M2)
-
-    # Union pattern via absolute values so no entry can cancel away.
-    U <- to_sym(abs(M0) + abs(M1s) + abs(M2))
-    Ut <- as(U, "TsparseMatrix")
-    n <- nrow(U)
-    key_u <- as.numeric(Ut@i) + as.numeric(Ut@j) * n
-
-    align <- function(M) {
-      Mt <- as(M, "TsparseMatrix")
-      key_m <- as.numeric(Mt@i) + as.numeric(Mt@j) * n
-      idx <- match(key_m, key_u)
-      if (anyNA(idx)) stop("component entry outside union pattern")
-      x <- numeric(length(key_u))
-      x[idx] <- Mt@x
-      x
-    }
-
-    list(
-      b0 = b0,
-      b1 = b1,
-      b2 = b2,
-      transform = p$transform,
-      U = U,
-      x0 = align(M0),
-      x1s = align(M1s),
-      x2 = align(M2)
+# Legacy support: setups saved by EBSmoothr <= 0.2.6 carry an INLA
+# `inla.spde2.matern` template here. Convert those to the native FEM object so
+# old objects keep working without INLA installed being required at fit time.
+.matern_as_fem <- function(spde_template, mesh = NULL, alpha = NULL, d = NULL) {
+  if (.is_matern_fem(spde_template)) return(spde_template)
+  if (is.null(mesh) || is.null(alpha) || is.null(d)) {
+    stop(
+      "This `Matern_setup` object predates the native FEM backend and cannot be ",
+      "upgraded in place. Rebuild it with `Matern_setup()`."
     )
-  }, error = function(e) NULL)
-  out
-}
-
-.matern_spde_precision_direct <- function(ctx, theta_spde) {
-  tv <- c(1, as.numeric(theta_spde))
-  phi0 <- exp(sum(ctx$b0 * tv))
-  phi1 <- exp(sum(ctx$b1 * tv))
-  phi2_lin <- sum(ctx$b2 * tv)
-  phi2 <- switch(
-    ctx$transform,
-    identity = phi2_lin,
-    log = 2 * exp(phi2_lin) - 1,
-    logit = cos(pi / (1 + exp(-phi2_lin))),
-    phi2_lin
-  )
-  Q <- ctx$U
-  Q@x <- phi0^2 * (phi1^2 * ctx$x0 + phi1 * phi2 * ctx$x1s + ctx$x2)
-  # Matrix caches factorizations inside @factors by reference; drop anything
-  # inherited from the shared pattern template so no stale factor can be
-  # picked up for the new numeric values.
-  Q@factors <- list()
-  Q
-}
-
-.matern_spde_template_with_direct_ctx <- function(spde_template) {
-  if (is.null(attr(spde_template, "EBSmoothr_direct_ctx", exact = TRUE))) {
-    attr(spde_template, "EBSmoothr_direct_ctx") <- .matern_spde_direct_ctx(spde_template)
   }
-  spde_template
+  .matern_fem_build(mesh = mesh, alpha = alpha, d = d)
 }
 
 .matern_precision_from_log_params <- function(spde_template, alpha, d, log_range, log_sigma) {
@@ -306,16 +227,7 @@ utils::globalVariables(".scale_w")
     alpha = alpha,
     d = d
   )
-  theta_spde <- c(log(ts$tau), log(ts$kappa))
-  ctx <- attr(spde_template, "EBSmoothr_direct_ctx", exact = TRUE)
-  Q <- if (!is.null(ctx)) {
-    .matern_spde_precision_direct(ctx, theta_spde)
-  } else {
-    Matrix::forceSymmetric(Matrix::Matrix(
-      INLA::inla.spde2.precision(spde_template, theta = theta_spde),
-      sparse = TRUE
-    ))
-  }
+  Q <- .matern_fem_precision(spde_template, kappa = ts$kappa, tau = ts$tau)
 
   list(
     Q = Q,
@@ -365,7 +277,7 @@ utils::globalVariables(".scale_w")
 
 .exact_matern_sufficient_stats <- function(x, s, A, spde_template, alpha, d, log_range, log_sigma,
                                            data_stats = NULL) {
-  .with_quiet_inla_defaults({
+  local({
     if (any(!is.finite(c(log_range, log_sigma)))) {
       stop("All Matern hyperparameters must be finite.")
     }
@@ -554,6 +466,41 @@ utils::globalVariables(".scale_w")
     stats = stats,
     beta_prec = beta_prec
   )
+}
+
+# Rigorous upper bound on the exact Gaussian log marginal likelihood.
+# With Sigma = A Q^{-1} A' + D and D = diag(s^2) we have Sigma >= D in the
+# Loewner order, so logdet(Sigma) >= sum(log(s^2)) and the quadratic form is
+# non-negative. Hence
+#
+#   loglik <= -n/2 log(2 pi) - sum(log(s)).
+#
+# This holds for every proper Q. A computed value above it therefore signals a
+# numerically meaningless evaluation -- in practice a hyperparameter corner
+# where Q has gone (numerically) rank deficient, which makes the implied prior
+# improper and the marginal likelihood unbounded, or where 1 / s^2 is large
+# enough that the sufficient statistics lose all their significant digits.
+# Callers treat the resulting error the same way they treat a Cholesky failure.
+.exact_matern_loglik_upper_bound <- function(s) {
+  s <- as.numeric(s)
+  -0.5 * length(s) * log(2 * pi) - sum(log(s))
+}
+
+.exact_matern_assert_loglik_valid <- function(value, s) {
+  value <- as.numeric(value)
+  if (length(value) != 1L || !is.finite(value)) {
+    stop("The exact Matern objective is not finite at these hyperparameters.")
+  }
+  bound <- .exact_matern_loglik_upper_bound(s)
+  slack <- sqrt(.Machine$double.eps) * max(1, abs(bound))
+  if (value > bound + slack) {
+    stop(
+      "The exact Matern objective (", format(value, digits = 6), ") exceeds its ",
+      "theoretical upper bound (", format(bound, digits = 6), "); the precision ",
+      "matrix is numerically singular at these hyperparameters."
+    )
+  }
+  invisible(TRUE)
 }
 
 .exact_matern_unknown_noise_s <- function(noise_sd, n, noise_scale = NULL) {
@@ -1295,7 +1242,22 @@ utils::globalVariables(".scale_w")
   )
 }
 
+.require_inla <- function(what = "this backend") {
+  if (!requireNamespace("INLA", quietly = TRUE)) {
+    stop(
+      "`INLA` is required for ", what, " but is not installed. Install it with ",
+      "`install.packages(\"INLA\", repos = c(getOption(\"repos\"), ",
+      "INLA = \"https://inla.r-inla-download.org/R/stable\"))`, or use one of the ",
+      "native backends (\"exact\", \"laplace\", \"laplace_fisher\", \"fisher_pql\"), ",
+      "which do not depend on INLA.",
+      call. = FALSE
+    )
+  }
+  invisible(TRUE)
+}
+
 .with_quiet_inla_defaults <- function(expr) {
+  .require_inla()
   ns <- asNamespace("INLA")
   default_name <- "inla.getOption.default"
   old_default <- get(default_name, envir = ns)
@@ -4049,8 +4011,11 @@ matern_objective_breakdown <- function(fit,
 }
 
 .matern_laplace_tmb_unsupported_reason <- function(alpha, beta_mode) {
-  if (!isTRUE(all.equal(as.numeric(alpha), 2))) {
-    return("The TMB Matern Laplace implementation currently supports `alpha = 2` only.")
+  if (!is.numeric(alpha) || length(alpha) != 1L || !is.finite(alpha)) {
+    return("`alpha` must be a single finite numeric for the TMB Matern Laplace implementation.")
+  }
+  if (abs(alpha - round(alpha)) > sqrt(.Machine$double.eps)) {
+    return("The TMB Matern Laplace implementation supports integer `alpha` only.")
   }
   NULL
 }
@@ -4135,10 +4100,17 @@ matern_objective_breakdown <- function(fit,
   reason <- .matern_laplace_tmb_unsupported_reason(alpha = alpha, beta_mode = beta_mode)
   if (!is.null(reason)) stop(reason)
 
-  param <- spde_template$param.inla
-  if (is.null(param$M0) || is.null(param$M1) || is.null(param$M2)) {
-    stop("The Matern SPDE template does not contain the alpha=2 precision basis matrices.")
+  if (!.is_matern_fem(spde_template)) {
+    stop("The Matern FEM object is missing; rebuild the setup with `Matern_setup()`.")
   }
+  if (!identical(as.integer(round(alpha)), spde_template$alpha)) {
+    stop("`alpha` does not match the alpha the Matern FEM basis was built for.")
+  }
+  fem_G <- lapply(
+    spde_template$matrices,
+    function(M) as(Matrix::Matrix(M, sparse = TRUE), "TsparseMatrix")
+  )
+  names(fem_G) <- NULL
 
   betaprec_internal <- if (identical(beta_mode, "prior_proper")) {
     beta_prec <- .check_optional_beta_prec(beta_prec, "beta_prec")
@@ -4155,9 +4127,8 @@ matern_objective_breakdown <- function(fit,
     x = as.numeric(x),
     s = as.numeric(s),
     A = as(Matrix::Matrix(A, sparse = TRUE), "TsparseMatrix"),
-    M0 = as(Matrix::Matrix(param$M0, sparse = TRUE), "TsparseMatrix"),
-    M1 = as(Matrix::Matrix(param$M1, sparse = TRUE), "TsparseMatrix"),
-    M2 = as(Matrix::Matrix(param$M2, sparse = TRUE), "TsparseMatrix"),
+    G = fem_G,
+    fem_binom = as.numeric(spde_template$binom),
     betaprec = as.numeric(betaprec_internal),
     matern_alpha = as.numeric(alpha),
     matern_d = as.integer(d),
@@ -5439,6 +5410,7 @@ matern_objective_breakdown <- function(fit,
     } else {
       raw_eval_objective(par)
     }
+    .exact_matern_assert_loglik_valid(objective$log_marginal, objective$s)
     objective$stats$theta_log_range <- par[["log_range"]]
     objective$stats$theta_log_sigma <- par[["log_sigma"]]
     .exact_matern_add_pc_prior(objective, pc_penalty = pc_penalty, d = d)
@@ -5447,7 +5419,9 @@ matern_objective_breakdown <- function(fit,
   safe_objective <- function(par) {
     objective <- tryCatch(eval_objective(par), error = function(e) e)
     if (inherits(objective, "error")) return(1e100)
-    -objective$log_marginal
+    value <- -objective$log_marginal
+    if (!is.finite(value)) return(1e100)
+    value
   }
 
   par0 <- c(log_range = theta_init, log_sigma = log(sigma_init), log_noise = log(noise_sd_init))
@@ -5724,7 +5698,13 @@ matern_objective_breakdown <- function(fit,
     stop("`setup$A` must have one row per location.")
   }
   setup$penalty_range <- as.numeric(setup$penalty_range)
-  setup$spde_template <- .matern_spde_template_with_direct_ctx(setup$spde_template)
+  setup$alpha <- .check_matern_alpha(setup$alpha, setup$d)
+  setup$spde_template <- .matern_as_fem(
+    setup$spde_template,
+    mesh = setup$mesh,
+    alpha = setup$alpha,
+    d = setup$d
+  )
   class(setup) <- unique(c("Matern_setup", class(setup)))
   setup
 }
@@ -5781,15 +5761,18 @@ matern_objective_breakdown <- function(fit,
 #'
 #' @param locations Numeric vector, matrix, or data frame of one- or
 #'   two-dimensional locations.
-#' @param max.edge Optional mesh-resolution control passed to INLA mesh
-#'   construction. For one-dimensional locations this may be a scalar; for
-#'   two-dimensional locations it may be \code{NULL}, length 1, or length 2.
-#'   When \code{NULL}, the two-dimensional default uses a coarser outer mesh
-#'   while keeping observed locations as mesh vertices.
-#' @param alpha Smoothness order for the SPDE representation. Must satisfy
-#'   \code{alpha > d / 2}.
+#' @param max.edge Optional mesh-resolution control passed to
+#'   \code{fmesher::fm_mesh_2d_inla()}. Ignored for one-dimensional locations,
+#'   whose mesh knots are exactly the observed locations; for two-dimensional
+#'   locations it may be \code{NULL}, length 1, or length 2. When \code{NULL},
+#'   the two-dimensional default uses a coarser outer mesh while keeping
+#'   observed locations as mesh vertices.
+#' @param alpha Smoothness order for the SPDE representation. Must be a
+#'   positive integer satisfying \code{alpha > d / 2}; values up to 8 are
+#'   supported. Fractional \code{alpha} would require a rational SPDE
+#'   approximation and is not implemented.
 #' @param suppress_warnings Logical scalar. If \code{TRUE}, suppresses warnings
-#'   from INLA mesh/SPDE construction.
+#'   from mesh and FEM construction.
 #'
 #' @return A list of class \code{"Matern_setup"} containing the normalized
 #'   locations, spatial dimension, mesh, projector matrix, SPDE template,
@@ -5800,42 +5783,37 @@ Matern_setup <- function(locations,
                          max.edge = NULL,
                          alpha = 2,
                          suppress_warnings = TRUE) {
-  .with_quiet_inla_defaults({
-    loc_info <- .normalize_locations(locations)
-    loc_mat <- loc_info$loc
-    d <- loc_info$d
+  loc_info <- .normalize_locations(locations)
+  loc_mat <- loc_info$loc
+  d <- loc_info$d
+  alpha <- .check_matern_alpha(alpha, d)
 
-    if (alpha <= d / 2) {
-      stop("`alpha` must satisfy alpha > d / 2.")
-    }
+  meshA <- if (suppress_warnings) {
+    suppressWarnings(.build_mesh_A(loc_mat, max.edge = max.edge))
+  } else {
+    .build_mesh_A(loc_mat, max.edge = max.edge)
+  }
 
-    meshA <- if (suppress_warnings) {
-      suppressWarnings(.build_mesh_A(loc_mat, max.edge = max.edge))
-    } else {
-      .build_mesh_A(loc_mat, max.edge = max.edge)
-    }
+  fem <- if (suppress_warnings) {
+    suppressWarnings(.matern_fem_build(mesh = meshA$mesh, alpha = alpha, d = d))
+  } else {
+    .matern_fem_build(mesh = meshA$mesh, alpha = alpha, d = d)
+  }
 
-    spde_template <- if (suppress_warnings) {
-      suppressWarnings(INLA::inla.spde2.matern(mesh = meshA$mesh, alpha = alpha))
-    } else {
-      INLA::inla.spde2.matern(mesh = meshA$mesh, alpha = alpha)
-    }
-    spde_template <- .matern_spde_template_with_direct_ctx(spde_template)
-
-    structure(
-      list(
-        locations = loc_mat,
-        d = d,
-        mesh = meshA$mesh,
-        A = meshA$A,
-        spde_template = spde_template,
-        alpha = as.numeric(alpha),
-        max.edge = max.edge,
-        penalty_range = .default_penalty_range(loc_mat)
-      ),
-      class = c("Matern_setup", "list")
-    )
-  })
+  structure(
+    list(
+      locations = loc_mat,
+      d = d,
+      mesh = meshA$mesh,
+      A = meshA$A,
+      spde_template = fem,
+      fem = fem,
+      alpha = as.numeric(alpha),
+      max.edge = max.edge,
+      penalty_range = .default_penalty_range(loc_mat)
+    ),
+    class = c("Matern_setup", "list")
+  )
 }
 
 #' Define the Matern GP Family
@@ -5982,9 +5960,10 @@ Matern <- function(theta = NULL, sigma = 1, beta = NULL, beta_prec = NULL) {
 #'   \code{\link{Matern_setup}}. Supply either \code{locations} or
 #'   \code{setup}, but not both.
 #' @param max.edge Mesh maximum edge length.
-#' @param alpha Smoothness parameter used in the SPDE representation. It is held
+#' @param alpha Smoothness parameter used in the SPDE representation. Must be a
+#'   positive integer with \code{alpha > d / 2}. It is held
 #'   fixed and is not optimized.
-#' @param suppress_warnings If \code{TRUE}, suppress warnings from INLA mesh and
+#' @param suppress_warnings If \code{TRUE}, suppress warnings from mesh and
 #'   SPDE construction.
 #' @param penalty_range Initial range anchor used when \code{g_init$theta} is
 #'   missing. If \code{NULL}, defaults to roughly one-tenth of the spatial

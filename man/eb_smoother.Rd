@@ -112,7 +112,9 @@ latent process scale but is not a guaranteed convergence fix.}
 \item{penalty_range}{Initial range anchor for the Matern family when
 \code{g_init$theta} is missing.}
 
-\item{alpha}{Matern SPDE smoothness parameter.}
+\item{alpha}{Matern SPDE smoothness parameter. Must be a positive integer
+satisfying \code{alpha > d / 2} (values up to 8 are supported); the FEM
+precision is assembled natively for any such \code{alpha}.}
 
 \item{max.edge}{Optional mesh size control for the Matern family. For
 two-dimensional Matern fits with \code{max.edge = NULL}, the default keeps all
@@ -136,7 +138,7 @@ from the scale of \code{x}.}
 \item{profile_s_tol}{Optimization tolerance for the profiled
 point-mass-reference noise SD.}
 
-\item{suppress_warnings}{If \code{TRUE}, suppress INLA mesh and SPDE warnings.}
+\item{suppress_warnings}{If \code{TRUE}, suppress mesh and FEM warnings.}
 
 \item{compute_exact_diagnostic}{If \code{TRUE}, store the exact Gaussian
 log-likelihood evaluated at the Matern INLA mode.}

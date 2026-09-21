@@ -30,10 +30,11 @@ both.}
 
 \item{max.edge}{Mesh maximum edge length.}
 
-\item{alpha}{Smoothness parameter used in the SPDE representation. It is held
+\item{alpha}{Smoothness parameter used in the SPDE representation. Must be a
+positive integer with \code{alpha > d / 2}. It is held
 fixed and is not optimized.}
 
-\item{suppress_warnings}{If \code{TRUE}, suppress warnings from INLA mesh and
+\item{suppress_warnings}{If \code{TRUE}, suppress warnings from mesh and
 SPDE construction.}
 
 \item{penalty_range}{Initial range anchor used when \code{g_init$theta} is

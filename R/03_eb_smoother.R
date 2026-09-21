@@ -1660,7 +1660,9 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
 #'   latent process scale but is not a guaranteed convergence fix.
 #' @param penalty_range Initial range anchor for the Matern family when
 #'   `g_init$theta` is missing.
-#' @param alpha Matern SPDE smoothness parameter.
+#' @param alpha Matern SPDE smoothness parameter. Must be a positive integer
+#'   satisfying `alpha > d / 2` (values up to 8 are supported); the FEM
+#'   precision is assembled natively for any such `alpha`.
 #' @param max.edge Optional mesh size control for the Matern family. For
 #'   two-dimensional Matern fits with `max.edge = NULL`, the default keeps all
 #'   observed locations as mesh vertices and uses a coarser outer mesh for
@@ -1678,7 +1680,7 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
 #'   from the scale of `x`.
 #' @param profile_s_tol Optimization tolerance for the profiled
 #'   point-mass-reference noise SD.
-#' @param suppress_warnings If `TRUE`, suppress INLA mesh and SPDE warnings.
+#' @param suppress_warnings If `TRUE`, suppress mesh and FEM warnings.
 #' @param compute_exact_diagnostic If `TRUE`, store the exact Gaussian
 #'   log-likelihood evaluated at the Matern INLA mode.
 #' @param link Link used by the selected family. The Matern family supports

@@ -1,7 +1,7 @@
 Package: EBSmoothr
 Type: Package
 Title: Empirical Bayes Smoothing with Continuous and Binary Markov Priors
-Version: 0.2.6
+Version: 0.3.0
 Authors@R: c(
     person(
       "EBSmoothr", "Developers",
@@ -21,6 +21,9 @@ Description: Provides empirical Bayes smoothers for Gaussian means using
     families, symmetric Markov binary normal-means models with an exact iid
     limit, spatial scoring wrappers, TMB backends for L-GP and Matern Laplace
     models, and exact Gaussian / INLA-SPDE backends for Matern models.
+    Matern mesh and FEM assembly use 'fmesher' and support any integer SPDE
+    smoothness order alpha > d / 2; 'INLA' is optional and needed only for
+    the cross-checking 'inla' and 'inlabru' backends.
 License: MIT + file LICENSE
 URL: https://github.com/AgueroZZ/EBSmoothr
 BugReports: https://github.com/AgueroZZ/EBSmoothr/issues
@@ -35,10 +38,11 @@ Imports:
     numDeriv,
     LaplacesDemon,
     ebnm,
-    INLA
+    fmesher
 Suggests:
     testthat (>= 3.0.0),
     flashier,
+    INLA,
     inlabru
 LinkingTo:
     TMB,

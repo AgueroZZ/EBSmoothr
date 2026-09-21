@@ -10,17 +10,20 @@ Matern_setup(locations, max.edge = NULL, alpha = 2, suppress_warnings = TRUE)
 \item{locations}{Numeric vector, matrix, or data frame of one- or
 two-dimensional locations.}
 
-\item{max.edge}{Optional mesh-resolution control passed to INLA mesh
-construction. For one-dimensional locations this may be a scalar; for
-two-dimensional locations it may be \code{NULL}, length 1, or length 2.
-When \code{NULL}, the two-dimensional default uses a coarser outer mesh
-while keeping observed locations as mesh vertices.}
+\item{max.edge}{Optional mesh-resolution control passed to
+\code{fmesher::fm_mesh_2d_inla()}. Ignored for one-dimensional locations,
+whose mesh knots are exactly the observed locations; for two-dimensional
+locations it may be \code{NULL}, length 1, or length 2. When \code{NULL},
+the two-dimensional default uses a coarser outer mesh while keeping
+observed locations as mesh vertices.}
 
-\item{alpha}{Smoothness order for the SPDE representation. Must satisfy
-\code{alpha > d / 2}.}
+\item{alpha}{Smoothness order for the SPDE representation. Must be a
+positive integer satisfying \code{alpha > d / 2}; values up to 8 are
+supported. Fractional \code{alpha} would require a rational SPDE
+approximation and is not implemented.}
 
 \item{suppress_warnings}{Logical scalar. If \code{TRUE}, suppresses warnings
-from INLA mesh/SPDE construction.}
+from mesh and FEM construction.}
 }
 \value{
 A list of class \code{"Matern_setup"} containing the normalized

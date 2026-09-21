@@ -1,3 +1,55 @@
+# EBSmoothr 0.3.0
+
+## New Features
+
+- Matern mesh construction, the observation projector, and the SPDE FEM
+  matrices now come from `fmesher` instead of `INLA`. `INLA` moved from
+  `Imports` to `Suggests` and is needed only for the cross-checking
+  `backend = "inla"` and `backend = "inlabru"` fits, which now fail with an
+  actionable message when it is absent. All native backends (`"exact"`,
+  `"laplace"`, `"laplace_fisher"`, `"fisher_pql"`) run with no `INLA`
+  installation at all. Meshes, projectors and precisions are bit-identical to
+  the ones the previous `INLA`-built setups produced.
+
+- `alpha` is no longer restricted to 2. The FEM precision is assembled natively
+  for any integer `alpha > d / 2` (up to 8) from the binomial expansion of the
+  Lindgren-Rue-Lindstrom recursion,
+
+      Q = tau^2 * sum_{k=0}^{alpha} choose(alpha, k) kappa^(2 (alpha - k)) G_k,
+
+  with `G_0 = C`, `G_1 = G` and `G_k = G C^{-1} G_{k-1}`. This covers the exact,
+  Laplace, Fisher and PQL backends, including the TMB objective, which
+  previously accepted `alpha = 2` only. `INLA`'s own `spde2` model supports
+  `alpha <= 2`, so `alpha >= 3` is not available through the `"inla"` backend.
+  Fractional `alpha` is rejected explicitly rather than silently mis-handled: it
+  would need a rational SPDE approximation, which is not implemented.
+
+## Bug Fixes
+
+- The exact learned-noise Matern fit could walk into a hyperparameter corner
+  where `kappa -> 0` makes the FEM precision numerically rank deficient. The
+  implied prior is then improper and the marginal likelihood unbounded, while
+  `1 / noise_sd^2` grows large enough to destroy every significant digit of the
+  sufficient statistics; the optimizer chased the resulting garbage and returned
+  a nonsensical fit with `noise_sd` underflowed to ~1e-69. Objective evaluations
+  are now checked against the rigorous bound
+  `loglik <= -n/2 log(2 pi) - sum(log(s))`, which follows from
+  `A Q^{-1} A' + D >= D`, and rejected when they exceed it. Previously this was
+  caught only by accident, when the Cholesky factorization happened to fail
+  first.
+
+## Internal
+
+- Removed `.matern_spde_direct_ctx()`, `.matern_spde_precision_direct()` and
+  `.matern_spde_template_with_direct_ctx()`. `Matern_setup()` now stores a
+  `matern_fem` object (also exposed as `setup$fem`); `setup$spde_template` keeps
+  the old name for compatibility and holds the same object. Setups saved by
+  earlier versions are upgraded in place by `.validate_matern_setup()`.
+
+- `.with_quiet_inla_defaults()`, which monkey-patches the `INLA` namespace, is
+  no longer called from `Matern_setup()`, `.build_mesh_A()` or the per-iteration
+  exact objective; it is confined to the `inla` and `inlabru` fit functions.
+
 # EBSmoothr 0.2.6
 
 ## New Features

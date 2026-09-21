@@ -1,5 +1,18 @@
 #include <TMB.hpp>
 
+// List of sparse matrices, used to pass the FEM basis G_0 = C, G_1, ..., G_alpha
+// for an arbitrary integer SPDE smoothness order.
+template<class Type>
+struct LOSM_t : vector<Eigen::SparseMatrix<Type> > {
+  LOSM_t(SEXP x) {
+    (*this).resize(LENGTH(x));
+    for (int i = 0; i < LENGTH(x); i++) {
+      SEXP sm = VECTOR_ELT(x, i);
+      (*this)(i) = tmbutils::asSparseMatrix<Type>(sm);
+    }
+  }
+};
+
 template<class Type>
 Type log_matern_pc_prior(Type log_range,
                          Type log_sigma,
@@ -143,11 +156,10 @@ Type objective_function<Type>::operator() ()
     DATA_VECTOR(x);                // observed
     DATA_VECTOR(s);                // known sd (length n)
     DATA_SPARSE_MATRIX(A);         // observation projector (n x n_spde)
-    DATA_SPARSE_MATRIX(M0);        // SPDE precision basis
-    DATA_SPARSE_MATRIX(M1);        // SPDE precision basis
-    DATA_SPARSE_MATRIX(M2);        // SPDE precision basis
+    DATA_STRUCT(G, LOSM_t);        // FEM basis: G(0) = C, G(1) = G, ..., G(alpha)
+    DATA_VECTOR(fem_binom);        // choose(alpha, k) for k = 0, ..., alpha
     DATA_SCALAR(betaprec);         // beta precision; <=0 => no proper prior
-    DATA_SCALAR(matern_alpha);     // v1 expects alpha = 2
+    DATA_SCALAR(matern_alpha);     // integer SPDE smoothness order, alpha > d/2
     DATA_INTEGER(matern_d);        // spatial dimension
     DATA_INTEGER(link_id);         // 0: identity, 1: exp-link, 2: softplus-link
     DATA_INTEGER(learn_noise);     // 0: use known s, 1: learn one common noise SD
@@ -167,14 +179,13 @@ Type objective_function<Type>::operator() ()
     Type nll = Type(0);
 
     // --------------------
-    // Matern SPDE precision for alpha = 2:
-    // Q = tau^2 * (kappa^4 M0 + 2 kappa^2 M1 + M2)
+    // Matern SPDE precision for integer alpha:
+    // Q = tau^2 * sum_{k=0}^{alpha} choose(alpha, k) kappa^(2 (alpha - k)) G_k
     // --------------------
+    int alpha_int = G.size() - 1;
     Type d_type = Type(matern_d);
     Type nu = matern_alpha - d_type / Type(2.0);
     Type log_kappa = Type(0.5) * log(Type(8.0) * nu) - log_range;
-    Type kappa2 = exp(Type(2.0) * log_kappa);
-    Type kappa4 = kappa2 * kappa2;
     Type log_tau =
       Type(0.5) * (
         lgamma(nu) -
@@ -185,9 +196,11 @@ Type objective_function<Type>::operator() ()
       );
     Type tau2 = exp(Type(2.0) * log_tau);
 
-    Eigen::SparseMatrix<Type> Q = M0 * kappa4;
-    Q += M1 * (Type(2.0) * kappa2);
-    Q += M2;
+    Eigen::SparseMatrix<Type> Q =
+      G(0) * (fem_binom(0) * exp(Type(2.0 * alpha_int) * log_kappa));
+    for (int k = 1; k <= alpha_int; k++) {
+      Q += G(k) * (fem_binom(k) * exp(Type(2.0 * (alpha_int - k)) * log_kappa));
+    }
     Q *= tau2;
 
     // --------------------
