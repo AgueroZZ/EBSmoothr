@@ -706,6 +706,46 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
 
 
 
+## Inner optimizer for the TMB hyperparameter ("step A") objectives.
+##
+## Through 0.3.0 these used `optim(method = "BFGS")`.  On the L-GP objectives
+## that is both slower and markedly less reliable: on the Canadian-weather
+## problem BFGS returned a point 7.4e3 nats short of the optimum at one data
+## scale, and under `betaprec = -1` it missed the optimum at 3 of 5 scales from
+## a cold start and 5 of 9 from a warm one.  `nlminb` hit the optimum in every
+## configuration tested, using 1.7-2.3x fewer objective evaluations and running
+## 2.7-3.5x faster.  The return code was also previously discarded; a
+## non-converged inner solve is now reported.
+.lgp_inner_optimize <- function(obj, what = "Step A") {
+  opt <- stats::nlminb(start = obj$par, objective = obj$fn, gradient = obj$gr)
+  code <- as.integer(opt$convergence)
+  if (!identical(code, 0L)) {
+    warning(what, ": inner hyperparameter optimization did not converge ",
+            "(nlminb code ", code,
+            if (nzchar(as.character(opt$message))) paste0(": ", opt$message) else "",
+            ").", call. = FALSE)
+  }
+  list(par = opt$par, value = as.numeric(opt$objective),
+       convergence = code, message = opt$message)
+}
+
+## Cold-start value for the L-GP log-precision `theta`.
+##
+## `theta` is a log precision, so the optimum moves by -2 * log c when the data
+## are rescaled by c.  Through 0.3.0 the cold start was fixed at 0 whatever the
+## data scale, leaving the optimizer a distance to cover that grew like
+## 2 * log c -- one of the routes into the line-search failures above.  Keying
+## the start to the observed scale of `x` makes it equivariant, so the work
+## required no longer depends on the units of the data.  Only consulted when no
+## `g_init` is supplied; an explicit `g_init$scale` always wins.  Restricted to
+## the identity link, where the scale of `x` is the scale of the latent field.
+.lgp_default_log_scale <- function(x, link = "identity") {
+  if (!identical(link, "identity")) return(0)
+  sx <- stats::sd(as.numeric(x))
+  if (!is.finite(sx) || sx <= 0) return(0)
+  -2 * log(sx)
+}
+
 .resolve_lgp_initial_state <- function(x,
                                        X,
                                        s = NULL,
@@ -720,7 +760,7 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
   pX <- ncol(X)
 
   if (is.null(g_init)) {
-    g_init <- LGP(scale = 0, beta = NULL, beta_prec = beta_prec)
+    g_init <- LGP(scale = .lgp_default_log_scale(x, link), beta = NULL, beta_prec = beta_prec)
   }
   theta0 <- .check_single_numeric(g_init$scale, "g_init$scale")
   beta_init <- if (!is.null(beta_fixed)) {
@@ -1241,7 +1281,7 @@ ebnm_LGP_generator <- function(LGP_setup,
           random = "U",
           silent = TRUE
         )
-        optA <- optim(par = objA$par, fn = objA$fn, gr = objA$gr, method = "BFGS")
+        optA <- .lgp_inner_optimize(objA)
         ll_stepA <- -as.numeric(optA$value)
         fitted_theta <- as.numeric(optA$par[["theta"]])
         fitted_beta <- as.numeric(beta_fixed_use)
@@ -1249,11 +1289,12 @@ ebnm_LGP_generator <- function(LGP_setup,
         objA <- TMB::MakeADFun(
           data = tmbdat,
           parameters = par0,
+          map = list(log_noise = factor(NA)),
           DLL = dll,
           random = "U",
           silent = TRUE
         )
-        optA <- optim(par = objA$par, fn = objA$fn, gr = objA$gr, method = "BFGS")
+        optA <- .lgp_inner_optimize(objA)
         ll_stepA <- -as.numeric(optA$value)
         fitted_theta <- as.numeric(optA$par[["theta"]])
         beta_idx <- which(names(optA$par) == "beta")
@@ -1265,11 +1306,12 @@ ebnm_LGP_generator <- function(LGP_setup,
         objA <- TMB::MakeADFun(
           data = tmbdat,
           parameters = par0,
+          map = list(log_noise = factor(NA)),
           DLL = dll,
           random = c("U", "beta"),
           silent = TRUE
         )
-        optA <- optim(par = objA$par, fn = objA$fn, gr = objA$gr, method = "BFGS")
+        optA <- .lgp_inner_optimize(objA)
         ll_stepA <- -as.numeric(optA$value)
         fitted_theta <- as.numeric(optA$par[["theta"]])
         fitted_beta <- rep(0, pX)

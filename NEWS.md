@@ -1,3 +1,65 @@
+# EBSmoothr 0.3.1
+
+## Bug Fixes
+
+- The TMB hyperparameter fits in `ebnm_LGP_generator()` carried `log_noise` as a
+  free outer parameter even though those fits set `learn_noise = 0L`, so the
+  objective did not depend on it: the gradient in that coordinate was exactly
+  zero and the objective exactly flat. A singular direction of that kind is
+  hostile to BFGS, whose curvature update is skipped whenever `y' s = 0`, and it
+  left the line search free to wander. Both calls now pass
+  `map = list(log_noise = factor(NA))`, matching what the fixed-beta branch
+  already did. The equivalent calls in `.fit_lgp_unknown_noise()` are
+  deliberately untouched: that path sets `learn_noise = 1L`, where `log_noise`
+  is a real parameter and is read back as the fitted noise SD.
+
+- The inner hyperparameter optimizer moved from `optim(method = "BFGS")` to
+  `nlminb()` in `ebnm_LGP_generator()` and `.fit_lgp_unknown_noise()` (six call
+  sites). BFGS was both slower and unreliable on these objectives. On the
+  Canadian-weather L-GP problem, across five data scales and two `betaprec`
+  conventions, BFGS returned a point 7.4e3 nats short of the optimum at one
+  scale and missed the optimum at 3 of 5 scales under `betaprec = -1`; supplying
+  a warm start did not rescue it (5 of 9 warm-start configurations were still
+  wrong, by up to 1.9 nats). `nlminb` found the optimum in all 24 configurations
+  tested, with 1.7-2.3x fewer objective evaluations and 2.7-3.5x lower wall
+  time per call.
+
+- The inner optimizer's return code was previously discarded. A non-converged
+  inner solve now raises a warning naming the `nlminb` code and message.
+
+- `ebnm_Matern_generator(setup = )` and `eb_smoother(setup = )` rejected any
+  setup whose `alpha` differed from the argument default of 2, so a setup built
+  with `Matern_setup(alpha = 3)` could only be used by repeating `alpha = 3` at
+  the call site. `alpha` is now inherited from the setup whenever the caller
+  does not supply it; an explicitly supplied `alpha` that contradicts the setup
+  is still an error. This was latent before 0.3.0, when `alpha = 2` was the only
+  order the native backends accepted.
+
+## Behaviour Changes
+
+- The cold-start value for the L-GP log-precision `theta` is now keyed to the
+  scale of the data, `-2 * log(sd(x))`, instead of being fixed at 0. `theta` is
+  a log precision, so the optimum moves by `-2 * log c` when the data are
+  rescaled by `c`; a fixed start left the optimizer a distance to cover that
+  grew like `2 * log c`. Only the identity link is affected, and only when no
+  `g_init` is supplied -- an explicit `g_init$scale`, and therefore every
+  warm-started call such as `flash_backfit(warmstart = TRUE)`, is unchanged.
+  Cold-start fits of the same data may now land on a slightly different (never
+  worse) optimum than in 0.3.0.
+
+## Notes
+
+- These changes were prompted by a diagnosis of non-convergence in
+  `flashier` + `ebnm_LGP_generator()` EBFPCA fits. The dominant cause of that
+  non-convergence is separate and is *not* addressed here: with
+  `LGP_setup(betaprec = 0)` the improper flat prior on the `pX` fixed effects
+  makes the L-GP marginal likelihood non-equivariant under rescaling,
+  `logL(c x, c s) = logL(x, s) - (n - pX) log c`, so inflating a loading's gauge
+  (`l -> c l`, `f -> f / c`, which leaves `L F'` exactly unchanged) raises the
+  EBMF ELBO by `pX * log c` without bound. Use `LGP_setup(betaprec = -1)`, which
+  profiles the fixed effects out by maximizing the marginal likelihood rather
+  than integrating them under an improper prior, to make the ELBO gauge-flat.
+
 # EBSmoothr 0.3.0
 
 ## New Features

@@ -808,7 +808,7 @@ print.summary.eb_smoother_fit <- function(x, ...) {
       random = "U",
       silent = TRUE
     )
-    optA <- optim(par = objA$par, fn = objA$fn, gr = objA$gr, method = "BFGS")
+    optA <- .lgp_inner_optimize(objA)
 
     ll_stepA <- -as.numeric(optA$value)
     fitted_theta <- as.numeric(optA$par[["theta"]])
@@ -822,7 +822,7 @@ print.summary.eb_smoother_fit <- function(x, ...) {
       random = "U",
       silent = TRUE
     )
-    optA <- optim(par = objA$par, fn = objA$fn, gr = objA$gr, method = "BFGS")
+    optA <- .lgp_inner_optimize(objA)
 
     ll_stepA <- -as.numeric(optA$value)
     fitted_theta <- as.numeric(optA$par[["theta"]])
@@ -841,7 +841,7 @@ print.summary.eb_smoother_fit <- function(x, ...) {
       random = c("U", "beta"),
       silent = TRUE
     )
-    optA <- optim(par = objA$par, fn = objA$fn, gr = objA$gr, method = "BFGS")
+    optA <- .lgp_inner_optimize(objA)
 
     ll_stepA <- -as.numeric(optA$value)
     fitted_theta <- as.numeric(optA$par[["theta"]])
@@ -1906,7 +1906,7 @@ eb_smoother <- function(x,
       locations = locations,
       setup = setup,
       max.edge = max.edge,
-      alpha = alpha,
+      alpha = if (alpha_missing) NULL else alpha,
       suppress_warnings = suppress_warnings,
       penalty_range = penalty_range
     )

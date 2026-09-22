@@ -5722,7 +5722,7 @@ matern_objective_breakdown <- function(fit,
     out <- Matern_setup(
       locations = locations,
       max.edge = max.edge,
-      alpha = alpha,
+      alpha = if (is.null(alpha)) 2 else alpha,
       suppress_warnings = suppress_warnings
     )
   } else {
@@ -5733,7 +5733,9 @@ matern_objective_breakdown <- function(fit,
       stop("`max.edge` cannot be supplied when `setup` is provided.")
     }
     out <- .validate_matern_setup(setup)
-    if (!isTRUE(all.equal(as.numeric(alpha), as.numeric(out$alpha)))) {
+    # `alpha = NULL` means the caller did not ask for a particular smoothness,
+    # so inherit whatever the setup was built with.
+    if (!is.null(alpha) && !isTRUE(all.equal(as.numeric(alpha), as.numeric(out$alpha)))) {
       stop("When `setup` is provided, `alpha` must match `setup$alpha`.")
     }
   }
@@ -6045,6 +6047,7 @@ ebnm_Matern_generator <- function(locations = NULL,
                                   pql_inner_iter = 3L,
                                   link = c("identity", "log", "softplus", "logit", "probit")) {
 
+  alpha_missing <- missing(alpha)
   backend <- .match_matern_backend_arg(backend)
   link <- match.arg(link)
   if (!link %in% c("identity", "log", "softplus")) {
@@ -6056,7 +6059,7 @@ ebnm_Matern_generator <- function(locations = NULL,
     locations = locations,
     setup = setup,
     max.edge = max.edge,
-    alpha = alpha,
+    alpha = if (alpha_missing) NULL else alpha,
     suppress_warnings = suppress_warnings,
     penalty_range = penalty_range
   )
