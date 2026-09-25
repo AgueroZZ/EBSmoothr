@@ -1,3 +1,37 @@
+# EBSmoothr 0.3.2
+
+## New features
+
+- `krige_GP()` evaluates a fitted L-GP or Matern smoother at new locations and
+  returns the posterior mean, SD and a pointwise credible interval (optionally the
+  full covariance). The fitted hyperparameters are plugged in, and the prior's fixed
+  effects (the Matern intercept `beta0`, the L-GP global polynomial) are included:
+  held at their fitted value under empirical Bayes, integrated over when
+  `beta_prec` is set. Two methods:
+  - `method = "analytical"` krige with the continuous process the prior
+    approximates (Matern covariance with `nu = alpha - d/2` and
+    `kappa = sqrt(8 nu) / range`; for the L-GP a p-fold integrated Wiener process
+    with diffusion variance `exp(-theta)`), conditioned on the fitted posterior at
+    the observed locations;
+  - `method = "fem"` evaluate the prior's own finite representation (Matern finite
+    elements, L-GP local polynomial basis).
+  Both reproduce the fit at the observed locations. As the L-GP knots, or the Matern
+  mesh, get denser the two methods agree. Identity link with known standard errors only.
+- In 1-d the analytical Matern uses, by default, the Matern with Neumann boundary
+  conditions at the ends of the mesh (`boundary = "neumann"`, computed by the method of
+  images, or its cosine series for very long ranges). This is the process EBSmoothr's
+  1-d finite elements converge to, since their natural boundary conditions are Neumann;
+  the stationary Matern (`boundary = "stationary"`, the only option in 2-d) differs from
+  it within about one range of the ends.
+- `krige_flash()` is a lightweight wrapper for flashier fits: from a flash object,
+  the setup and the new locations it returns the posterior mean of every factor there,
+  optionally normalized to match `flashier::ldf()`.
+- `flash_ebnm_data()` rebuilds the data `x`, standard errors `s` and fitted prior `g`
+  of one factor of a (backfitted) flash object, for use with `krige_GP()`.
+- `LGP_setup()` now attaches its locations, knots and `p` as attribute
+  `"lgp_design"`. Setups created with earlier versions still fit, but `krige_GP()`
+  and `krige_flash()` need the attribute.
+
 # EBSmoothr 0.3.1
 
 ## Bug Fixes

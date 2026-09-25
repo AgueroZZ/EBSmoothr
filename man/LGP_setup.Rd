@@ -44,6 +44,9 @@ and additional scalars used by the TMB objective:
 (\code{0} identity, \code{1} log, \code{2} softplus).
 \item \code{model_id}: internal TMB objective selector; \code{0} for L-GP.
 }
+The locations, knots and \code{p} are attached as attribute \code{"lgp_design"},
+which \code{\link{krige_GP}} and \code{\link{krige_flash}} use to evaluate a fit at
+new locations.
 }
 \description{
 Precomputes the design matrices and penalty components used by the

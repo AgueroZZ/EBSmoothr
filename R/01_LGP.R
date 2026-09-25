@@ -372,6 +372,9 @@ LGP <- function(scale = 0, beta = NULL, beta_prec = NULL) {
 #'       (\code{0} identity, \code{1} log, \code{2} softplus).
 #'     \item \code{model_id}: internal TMB objective selector; \code{0} for L-GP.
 #'   }
+#'   The locations, knots and \code{p} are attached as attribute \code{"lgp_design"},
+#'   which \code{\link{krige_GP}} and \code{\link{krige_flash}} use to evaluate a fit at
+#'   new locations.
 #'
 #' @export
 LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity") {
@@ -393,6 +396,9 @@ LGP_setup <- function(t, p = 2, num_knots = 30, betaprec = 0, link = "identity")
     link_id = if (identical(link, "identity")) 0L else if (identical(link, "log")) 1L else 2L,
     model_id = 0L
   )
+  # Locations, knots and degree, for evaluating the fit elsewhere (krige_GP(), krige_flash()).
+  # Kept as an attribute so the list passed to TMB is unchanged.
+  attr(tmbdat, "lgp_design") <- list(t = t, p = as.integer(p), knots = knots)
   tmbdat
 }
 
