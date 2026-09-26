@@ -879,7 +879,7 @@ print.summary.eb_smoother_fit <- function(x, ...) {
       control = list(eval.max = 20000, iter.max = 20000)
     )
 
-      H <- numDeriv::hessian(function(w) ff$fn(w), optB$par)
+      H <- ff$he(optB$par)   # exact (AD) Hessian; ff has no random effects
       prec <- Matrix::forceSymmetric(H)
 
       U_hat <- as.numeric(optB$par)
@@ -914,7 +914,7 @@ print.summary.eb_smoother_fit <- function(x, ...) {
       control = list(eval.max = 20000, iter.max = 20000)
     )
 
-    H <- numDeriv::hessian(function(w) ff$fn(w), optB$par)
+    H <- ff$he(optB$par)   # exact (AD) Hessian; ff has no random effects
     prec <- Matrix::forceSymmetric(H)
 
     par_names <- names(optB$par)

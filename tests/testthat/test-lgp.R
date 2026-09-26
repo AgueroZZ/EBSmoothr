@@ -398,3 +398,52 @@ test_that("LGP fix_params supports scale and beta fixing", {
     "only available for `link = \"log\"`"
   )
 })
+
+test_that("LGP posterior variances come from the exact Hessian", {
+  # A flashier greedy input (MACS CD4 data) on which the finite-difference Hessian of
+  # EBSmoothr <= 0.3.2 came out indefinite, so the Cholesky factorization failed.
+  t <- round(seq(0.1, 5.9, by = 0.1), 1)
+  x <- c(
+    -0.040813, -0.199299, 0.0772324, -0.27512, -0.132185, -0.0766526, -0.251626, -0.130936,
+    -0.273515, -0.168829, -0.64935, 0.0177568, -0.043419, -0.982366, -0.00384134, 0.103939,
+    0.19565, 0.326493, 0.0741639, 0.178716, 0.796182, 0.657178, 0.773066, 1.31791,
+    0.449437, 0.628056, 0.758241, 0.487914, 0.814099, 0.263147, 0.549451, 0.289569,
+    1.10598, 0.0449059, -0.319995, -0.0208971, 0.0583886, -0.130171, 0.344796, -0.216905,
+    -0.290471, -0.0620152, -0.307795, -0.734135, -0.412321, -0.325843, -0.0811713, -0.355778,
+    -0.359046, -0.540386, -0.428005, -0.53867, -0.111299, -0.0543097, 0.136815, -0.158036,
+    -0.400224, -0.377207, 0.0120042
+  )
+  s <- c(
+    2.05618, 0.15916, 0.432936, 1.26813, 0.173545, 2.26581, 1.0149, 0.92181,
+    1.47179, 2.2466, 0.389214, 0.940669, 2.38833, 0.784954, 3.10584, 1.47748,
+    1.61921, 0.466, 0.48914, 3.69407, 0.173833, 1.47594, 2.22807, 0.503743,
+    3.24518, 2.60785, 1.35866, 1.8493, 0.617568, 3.6055, 2.44609, 2.90931,
+    1.43196, 4.61945, 0.592094, 3.01026, 5.82614, 1.81412, 5.95663, 0.603805,
+    5.20462, 2.14709, 5.44384, 0.620159, 2.72925, 3.4533, 6.23679, 2.19072,
+    0.622803, 2.89023, 5.31919, 2.29545, 12.4426, 0.623284, 7.46874, 4.61738,
+    7.68697, 3.85822, 19.6418
+  )
+  setup <- LGP_setup(t = t, betaprec = -1)
+  B <- as.matrix(setup$B)
+  X <- as.matrix(setup$X)
+  P <- as.matrix(setup$P)
+  fit_fun <- ebnm_LGP_generator(setup)
+  diag_AQA <- function(A, H) rowSums((A %*% solve(H)) * A)   # diag(A H^{-1} A')
+
+  # Empirical-Bayes beta: only the local coefficients U are random.
+  fit <- fit_fun(x, s)
+  H <- exp(fit$fitted_g$scale) * P + crossprod(B / s)
+  expect_equal(fit$posterior$var, diag_AQA(B, H), tolerance = 1e-8)
+
+  # Proper prior on beta: U and beta are random jointly.
+  fit_p <- fit_fun(x, s, beta_prec = 2)
+  A <- cbind(B, X)
+  H_p <- crossprod(A / s) +
+    as.matrix(Matrix::bdiag(exp(fit_p$fitted_g$scale) * P, diag(2, ncol(X))))
+  expect_equal(fit_p$posterior$var, diag_AQA(A, H_p), tolerance = 1e-8)
+
+  # eb_smoother() with a learned noise SD.
+  fit_l <- eb_smoother(x, s = NULL, family = "lgp", setup = setup)
+  H_l <- exp(fit_l$fitted_g$scale) * P + crossprod(B) / fit_l$fitted_noise_sd^2
+  expect_equal(fit_l$posterior$var, diag_AQA(B, H_l), tolerance = 1e-8)
+})

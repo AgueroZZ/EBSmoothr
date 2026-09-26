@@ -1354,7 +1354,7 @@ ebnm_LGP_generator <- function(LGP_setup,
         control = list(eval.max = 20000, iter.max = 20000)
       )
 
-      H <- numDeriv::hessian(function(w) ff$fn(w), optB$par)
+      H <- ff$he(optB$par)   # exact (AD) Hessian; ff has no random effects
       prec <- Matrix::forceSymmetric(H)
       U_hat <- as.numeric(optB$par)
       beta_hat <- as.numeric(if (beta_mode == "fixed") beta_fixed_use else fitted_beta)
@@ -1385,7 +1385,7 @@ ebnm_LGP_generator <- function(LGP_setup,
         control = list(eval.max = 20000, iter.max = 20000)
       )
 
-      H <- numDeriv::hessian(function(w) ff$fn(w), optB$par)
+      H <- ff$he(optB$par)   # exact (AD) Hessian; ff has no random effects
       prec <- Matrix::forceSymmetric(H)
       par_names <- names(optB$par)
       u_idx <- which(par_names == "U")

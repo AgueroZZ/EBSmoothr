@@ -1,3 +1,23 @@
+# EBSmoothr 0.3.3
+
+## Bug fixes
+
+- The L-GP fits (`ebnm_LGP_generator()` on its TMB path, and
+  `eb_smoother(family = "lgp")`) now take the posterior precision of the
+  coefficients from TMB's automatic-differentiation Hessian (`ff$he()`) instead of
+  a finite-difference one (`numDeriv::hessian()`). The finite-difference Hessian of
+  this quadratic objective could come out indefinite, and the Cholesky
+  factorization then failed with "leading principal minor of order k is not
+  positive". This happened when a coefficient's mode sat just above numDeriv's
+  zero tolerance: its step shrank to about 1e-6 and the second difference was lost
+  to rounding. It was hit in a flashier greedy step on the MACS CD4 data. The AD
+  Hessian is exact and about 70 times faster, so L-GP fits with many knots are
+  faster too. Posterior means and fitted hyperparameters are unchanged. Posterior
+  variances change only by the old finite-difference error, and so does the
+  log-likelihood reported with `fix_g = TRUE`, which is computed from the same
+  Hessian.
+- `numDeriv` is no longer a dependency.
+
 # EBSmoothr 0.3.2
 
 ## New features
