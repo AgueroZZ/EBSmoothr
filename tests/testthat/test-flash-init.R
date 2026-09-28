@@ -228,7 +228,7 @@ test_that("scale and sign are normalized without changing the fit", {
   d <- sim_resid(m = 6)
   Z <- !is.na(d$R)
   Q <- qr.Q(qr(.smooth_init_basis(d$t, "ns", 4L)))
-  raw <- .smooth_init_als(d$R, Z, Q, .smooth_init_starts(ncol(Q), 3L, 666), 100L, 1e-6)
+  raw <- .smooth_init_als(d$R, Z, Q, .smooth_init_starts(ncol(Q), 10L, 666), 100L, 1e-6)
   out <- .smooth_init_matrix(d$R, d$t)
   expect_equal(tcrossprod(out$row_values, out$column_values), tcrossprod(raw$l, raw$f),
                tolerance = 1e-12)

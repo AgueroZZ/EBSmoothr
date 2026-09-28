@@ -9,7 +9,8 @@
   `flash_greedy_init_default()`, but with the loading (or, with `smooth_dim = 2`, the
   factor) restricted to a low-dimensional basis: natural splines (`basis = "ns"`,
   `df = 4` basis functions including the constant, by default), intercept and slope
-  (`"linear"`) or a constant (`"constant"`, solved in closed form). It uses no prior,
+  (`"linear"`) or a constant (`"constant"`, solved in closed form), from 10 random
+  starts (`nstarts`), keeping the one with the smallest RSS. It uses no prior,
   noise variance or penalty, and leaves missing entries out. The basis restricts only
   the starting values; flashier then updates the factor with the priors in `ebnm_fn` as
   usual. With the unrestricted default, a column observed once is fit exactly whatever

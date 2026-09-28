@@ -65,10 +65,11 @@
 #' reach the same RSS. For the same reason a start can settle where \eqn{\ell} is
 #' nearly zero at the time of a column observed once, with that column's \eqn{f_j}
 #' growing without bound. Such a start fits the other columns worse, so the
-#' smallest-RSS rule avoids it as long as one start escapes; more starts
-#' (`nstarts`) make that more likely. There are no sign constraints: \eqn{\ell} and \eqn{f} can take
-#' both signs, so this initialization does not suit non-negative priors (a start that
-#' violates the prior's constraint can make greedy stop early). Only data given as an
+#' smallest-RSS rule avoids it as long as one start escapes; this is why the default
+#' uses 10 starts (on sparse simulated data, 3 starts all got stuck in 2 of 3 data
+#' sets, and 10 starts never did). There are no sign constraints: \eqn{\ell} and
+#' \eqn{f} can take both signs, so this initialization does not suit non-negative
+#' priors (a start that violates the prior's constraint can make greedy stop early). Only data given as an
 #' ordinary numeric matrix are supported, with missing entries as `NA`: not tensors,
 #' sparse `Matrix` objects or low-rank (`u`, `d`, `v`) data.
 #'
@@ -83,7 +84,9 @@
 #' @param df For `basis = "ns"`: number of basis functions, including the constant.
 #'   An integer of at least 2 and at most the number of distinct values of `x`
 #'   (`df = 2` is the linear space). Not used by the other bases.
-#' @param nstarts Number of random starts.
+#' @param nstarts Number of random starts. Each costs a few ALS iterations on the
+#'   observed entries, so 10 starts take a fraction of a second on matrices of a few
+#'   hundred by a few hundred.
 #' @param maxiter Maximum number of iterations per start.
 #' @param tol Tolerance on the relative decrease of the RSS.
 #' @param seed Random seed for the starts. The caller's random number stream is
@@ -130,7 +133,7 @@
 #' @export
 flash_greedy_init_smooth <- function(flash, x, smooth_dim = 1L,
                                      basis = c("ns", "constant", "linear"), df = 4L,
-                                     nstarts = 3L, maxiter = 100L, tol = 1e-6,
+                                     nstarts = 10L, maxiter = 100L, tol = 1e-6,
                                      seed = 666L) {
   basis <- match.arg(basis)
   if (!inherits(flash, c("flash_fit", "flash"))) {
@@ -309,7 +312,7 @@ flash_greedy_init_smooth <- function(flash, x, smooth_dim = 1L,
 # "numerical", "zero" = every score exactly zero, e.g. all-zero residuals, "exact" =
 # constant basis); starts has one row per start.
 .smooth_init_matrix <- function(R, x, smooth_dim = 1L, basis = c("ns", "constant", "linear"),
-                                df = 4L, nstarts = 3L, maxiter = 100L, tol = 1e-6,
+                                df = 4L, nstarts = 10L, maxiter = 100L, tol = 1e-6,
                                 seed = 666L) {
   basis <- match.arg(basis)
   if (!is.matrix(R) || !is.numeric(R)) {

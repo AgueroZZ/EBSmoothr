@@ -10,7 +10,7 @@ flash_greedy_init_smooth(
   smooth_dim = 1L,
   basis = c("ns", "constant", "linear"),
   df = 4L,
-  nstarts = 3L,
+  nstarts = 10L,
   maxiter = 100L,
   tol = 1e-06,
   seed = 666L
@@ -33,7 +33,9 @@ restrict the factors (columns).}
 An integer of at least 2 and at most the number of distinct values of \code{x}
 (\code{df = 2} is the linear space). Not used by the other bases.}
 
-\item{nstarts}{Number of random starts.}
+\item{nstarts}{Number of random starts. Each costs a few ALS iterations on the
+observed entries, so 10 starts take a fraction of a second on matrices of a few
+hundred by a few hundred.}
 
 \item{maxiter}{Maximum number of iterations per start.}
 
@@ -112,10 +114,11 @@ falls near a zero of \eqn{\ell}; and if every column is observed once, many curv
 reach the same RSS. For the same reason a start can settle where \eqn{\ell} is
 nearly zero at the time of a column observed once, with that column's \eqn{f_j}
 growing without bound. Such a start fits the other columns worse, so the
-smallest-RSS rule avoids it as long as one start escapes; more starts
-(\code{nstarts}) make that more likely. There are no sign constraints: \eqn{\ell} and \eqn{f} can take
-both signs, so this initialization does not suit non-negative priors (a start that
-violates the prior's constraint can make greedy stop early). Only data given as an
+smallest-RSS rule avoids it as long as one start escapes; this is why the default
+uses 10 starts (on sparse simulated data, 3 starts all got stuck in 2 of 3 data
+sets, and 10 starts never did). There are no sign constraints: \eqn{\ell} and
+\eqn{f} can take both signs, so this initialization does not suit non-negative
+priors (a start that violates the prior's constraint can make greedy stop early). Only data given as an
 ordinary numeric matrix are supported, with missing entries as \code{NA}: not tensors,
 sparse \code{Matrix} objects or low-rank (\code{u}, \code{d}, \code{v}) data.
 }
