@@ -1,3 +1,23 @@
+# EBSmoothr 0.3.4
+
+## New features
+
+- `flash_greedy_init_smooth()` is an initialization function for
+  `flashier::flash_greedy()` (pass it as `init_fn`) for sparse, irregularly sampled
+  data. It starts each new greedy factor from the rank-one alternating least-squares fit
+  to the observed entries of the current residuals, like flashier's default
+  `flash_greedy_init_default()`, but with the loading (or, with `smooth_dim = 2`, the
+  factor) restricted to a low-dimensional basis: natural splines (`basis = "ns"`,
+  `df = 4` basis functions including the constant, by default), intercept and slope
+  (`"linear"`) or a constant (`"constant"`, solved in closed form). It uses no prior,
+  noise variance or penalty, and leaves missing entries out. The basis restricts only
+  the starting values; flashier then updates the factor with the priors in `ebnm_fn` as
+  usual. With the unrestricted default, a column observed once is fit exactly whatever
+  the loading, and on sparse data the start can put almost all of the factor on a few
+  such columns. The restriction makes this less likely but does not rule it out. Nothing
+  changes unless the function is passed as `init_fn`.
+- `splines` (a base R package) is now in Imports.
+
 # EBSmoothr 0.3.3
 
 ## Bug fixes

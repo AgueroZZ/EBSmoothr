@@ -1,7 +1,7 @@
 Package: EBSmoothr
 Type: Package
 Title: Empirical Bayes Smoothing with Continuous and Binary Markov Priors
-Version: 0.3.3
+Version: 0.3.4
 Authors@R: c(
     person(
       "EBSmoothr", "Developers",
@@ -37,7 +37,8 @@ Imports:
     methods,
     LaplacesDemon,
     ebnm,
-    fmesher
+    fmesher,
+    splines
 Suggests:
     testthat (>= 3.0.0),
     flashier,
