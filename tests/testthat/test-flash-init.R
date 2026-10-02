@@ -316,3 +316,136 @@ test_that("flash_greedy() runs with the smooth initialization and recovers the l
   expect_equal(flt$n_factors, 1)
   expect_gt(abs(cosine(flt$F_pm[, 1], l1)), 0.98)
 })
+
+## ---- sign constraints (0.3.5) ----
+
+# n x p data with a smooth loading of mostly negative sign and non-negative, sparse
+# scores, so that the unconstrained start (largest |l| made positive) has f <= 0.
+sim_nonneg <- function(n = 40, p = 60, m = n, noise = 0.3, seed = 4) {
+  set.seed(seed)
+  tt <- seq(0, 1, length.out = n)
+  l <- -exp(-(tt - 0.4)^2 / 0.08) + 0.1
+  f <- rexp(p) * rbinom(p, 1, 0.6)
+  R <- outer(l, f) + matrix(rnorm(n * p, 0, noise), n, p)
+  if (m < n) for (j in seq_len(p)) R[-sample(n, m), j] <- NA
+  list(R = R, t = tt, l = l, f = f)
+}
+
+test_that("sign_constraints = NULL and c(0, 0) give the unconstrained fit", {
+  d <- sim_resid(m = 6)
+  for (basis in c("ns", "linear", "constant")) {
+    ref <- .smooth_init_matrix(d$R, d$t, basis = basis)
+    expect_identical(.smooth_init_matrix(d$R, d$t, basis = basis, sign_constraints = c(0, 0)), ref)
+    expect_identical(.smooth_init_matrix(d$R, d$t, basis = basis, sign_constraints = NULL), ref)
+  }
+})
+
+test_that("a constraint on the other dimension gives exact constrained f-steps", {
+  d <- sim_nonneg(m = 8)
+  Z <- !is.na(d$R)
+  R0 <- d$R
+  R0[!Z] <- 0
+  free <- .smooth_init_matrix(d$R, d$t)
+  expect_gt(sum(pmin(free$column_values, 0)^2), 0.5 * sum(free$column_values^2))  # mostly <= 0 ...
+  for (sg in c(1, -1)) {
+    out <- .smooth_init_matrix(d$R, d$t, sign_constraints = c(0, sg))
+    f <- out$column_values
+    expect_true(all(sg * f >= 0))
+    expect_true(any(f != 0))
+    # given the returned curve, f is the constrained least-squares solution
+    expect_equal(f, .smooth_init_clip(.smooth_init_fstep(R0, Z * 1, out$row_values), sg),
+                 tolerance = 1e-10)
+    expect_true(in_span(out$row_values, .smooth_init_basis(d$t, "ns", 4L)))
+    expect_false(out$status %in% c("rss_increase", "numerical"))
+    expect_equal(sum(out$row_values^2), sum(f^2), tolerance = 1e-12)
+    expect_equal(out$rss, sum((d$R - tcrossprod(out$row_values, f))^2, na.rm = TRUE), tolerance = 1e-10)
+  }
+  # ... and the non-negative start is the truth's direction, with the truth's sign
+  nn <- .smooth_init_matrix(d$R, d$t, sign_constraints = c(0, 1))
+  expect_gt(cosine(nn$row_values, d$l), 0.95)
+  expect_gt(cosine(nn$column_values, d$f), 0.95)
+})
+
+test_that("each start is tried with both signs when only the other dimension is constrained", {
+  d <- sim_nonneg()
+  Z <- !is.na(d$R)
+  Q <- qr.Q(qr(.smooth_init_basis(d$t, "ns", 4L)))
+  A0 <- .smooth_init_starts(ncol(Q), 1L, 666)
+  a <- .smooth_init_als(d$R, Z, Q, A0, 100L, 1e-6, sign_f = 1)
+  b <- .smooth_init_als(d$R, Z, Q, -A0, 100L, 1e-6, sign_f = 1)
+  expect_equal(a$rss, b$rss, tolerance = 1e-10)
+  expect_equal(a$l, b$l, tolerance = 1e-8)
+})
+
+test_that("a constraint on the smooth dimension clips the curve", {
+  d <- sim_nonneg(m = 8)
+  R <- -d$R                                    # = outer(-l, f): loading mostly >= 0, scores >= 0
+  for (sc in list(c(1, 0), c(1, 1))) {
+    out <- .smooth_init_matrix(R, d$t, sign_constraints = sc)
+    expect_true(all(out$row_values >= 0))
+    expect_true(all(sc[2] * out$column_values >= 0))
+    expect_true(any(out$column_values != 0))
+    expect_gt(cosine(out$row_values, -d$l), 0.9)
+    expect_lt(out$rss, out$tss)
+  }
+  out <- .smooth_init_matrix(R, d$t, sign_constraints = c(-1, 0))
+  expect_true(all(out$row_values <= 0))
+})
+
+test_that("sign_constraints refer to rows and columns, also with smooth_dim = 2", {
+  d <- sim_nonneg(m = 8)
+  a <- .smooth_init_matrix(d$R, d$t, smooth_dim = 1L, sign_constraints = c(0, 1))
+  b <- .smooth_init_matrix(t(d$R), d$t, smooth_dim = 2L, sign_constraints = c(1, 0))
+  expect_equal(a$row_values, b$column_values, tolerance = 1e-12)
+  expect_equal(a$column_values, b$row_values, tolerance = 1e-12)
+  expect_true(all(b$row_values >= 0))
+})
+
+test_that("basis = \"constant\" respects sign constraints", {
+  d <- sim_nonneg(m = 7)
+  out <- .smooth_init_matrix(d$R, d$t, basis = "constant", sign_constraints = c(0, 1))
+  cm <- colMeans(d$R, na.rm = TRUE)
+  expect_true(all(out$column_values >= 0))
+  expect_equal(tcrossprod(out$row_values, out$column_values)[1, ], pmax(cm, 0), tolerance = 1e-12)
+  out <- .smooth_init_matrix(d$R, d$t, basis = "constant", sign_constraints = c(-1, 0))
+  expect_true(all(out$row_values < 0))
+  expect_equal(tcrossprod(out$row_values, out$column_values)[1, ], cm, tolerance = 1e-12)
+})
+
+test_that("no feasible non-zero start gives zero vectors", {
+  set.seed(5)
+  tt <- seq(0, 1, length.out = 20)
+  R <- -outer(1 + tt, rexp(15))                # every entry < 0
+  for (basis in c("ns", "constant")) {
+    out <- .smooth_init_matrix(R, tt, basis = basis, sign_constraints = c(1, 1))
+    expect_true(all(out$row_values == 0))
+    expect_true(all(out$column_values == 0))
+  }
+})
+
+test_that("invalid sign_constraints are rejected", {
+  d <- sim_resid(m = 6)
+  for (bad in list(1, c(0, 2), c(0, NA), c("0", "1"), c(0, 0, 1))) {
+    expect_error(.smooth_init_matrix(d$R, d$t, sign_constraints = bad), "`sign_constraints`")
+  }
+})
+
+test_that("flash_greedy() with non-negative scores needs the sign constraint", {
+  skip_if_not_installed("flashier")
+  d <- sim_nonneg(p = 80, m = 10, noise = 0.2, seed = 6)
+  prior_L <- ebnm_Matern_generator(setup = Matern_setup(d$t, alpha = 2))
+  fl0 <- flashier::flash_init(d$R, var_type = 0)
+  init_nn <- function(f) flash_greedy_init_smooth(f, x = d$t, sign_constraints = c(0, 1))
+  expect_identical(init_nn(fl0$flash_fit)[[2]],
+                   .smooth_init_matrix(d$R, d$t, sign_constraints = c(0, 1))$column_values)
+  fl <- suppressWarnings(flashier::flash_greedy(fl0, Kmax = 1, init_fn = init_nn, verbose = 0,
+                                                ebnm_fn = list(prior_L, ebnm::ebnm_point_exponential)))
+  expect_equal(fl$n_factors, 1)
+  expect_true(all(fl$F_pm >= 0))
+  expect_gt(cosine(fl$L_pm[, 1], d$l), 0.98)
+  # unconstrained, the start's scores are mostly negative and the factor is lost
+  init_free <- function(f) flash_greedy_init_smooth(f, x = d$t)
+  fl_free <- suppressWarnings(flashier::flash_greedy(fl0, Kmax = 1, init_fn = init_free, verbose = 0,
+                                                     ebnm_fn = list(prior_L, ebnm::ebnm_point_exponential)))
+  expect_equal(fl_free$n_factors, 0)
+})

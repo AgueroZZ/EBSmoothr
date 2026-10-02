@@ -53,6 +53,30 @@
 #' prior, ridge or roughness penalty is involved, and missing entries (`NA` in the
 #' residuals) are left out, not treated as zeros.
 #'
+#' **Sign constraints.** `sign_constraints` gives one value per dimension of the data,
+#' rows first: `1` for a non-negative vector, `-1` for a non-positive one, `0` for
+#' none, as in [flashier::flash_greedy_init_default()]. flashier works these out from
+#' `ebnm_fn` (e.g. `c(0, 1)` for any loading prior with
+#' [ebnm::ebnm_point_exponential()] scores) but passes them only to its own default
+#' initialization, so with this function they have to be given explicitly. They are
+#' enforced the way flashier's default does it, by setting each update's entries of
+#' the wrong sign to zero:
+#' * On the other dimension (\eqn{f}), this gives the exact constrained least-squares
+#'   step, because the problem is separable in the \eqn{f_j}. The iteration still
+#'   never increases the RSS. Since \eqn{f}'s sign then fixes \eqn{\ell}'s, each
+#'   random start is tried with both signs of its curve, and the one with the smaller
+#'   RSS is kept.
+#' * On the smooth dimension, the curve \eqn{B\alpha} is clipped after each step. The
+#'   clipped curve is in general no longer in the span of the basis, and the step is
+#'   no longer an exact least-squares step, so the RSS can increase; the start then
+#'   stops and keeps its best iterate (status `"rss_increase"`). Each start's curve is
+#'   flipped to have the constrained sign where its largest entry is.
+#'
+#' With a constraint on either dimension, the returned vectors keep the signs the
+#' constraints give them (no sign normalization). If no start has a non-zero fit
+#' within the constraints, both vectors are zero, and flashier then adds no further
+#' factor. `sign_constraints = NULL` (default) or `c(0, 0)` gives the unconstrained fit.
+#'
 #' A column with no observed entry gets \eqn{f_j = 0}, as does a column whose observed
 #' rows all have \eqn{|\ell_i|} at rounding level, at most \eqn{100\epsilon
 #' \max_i |\ell_i|} (the ratio would then be rounding error). A row of the smooth
@@ -67,9 +91,9 @@
 #' growing without bound. Such a start fits the other columns worse, so the
 #' smallest-RSS rule avoids it as long as one start escapes; this is why the default
 #' uses 10 starts (on sparse simulated data, 3 starts all got stuck in 2 of 3 data
-#' sets, and 10 starts never did). There are no sign constraints: \eqn{\ell} and
-#' \eqn{f} can take both signs, so this initialization does not suit non-negative
-#' priors (a start that violates the prior's constraint can make greedy stop early). Only data given as an
+#' sets, and 10 starts never did). With a non-negative (or non-positive) prior on
+#' either dimension, pass `sign_constraints`: unconstrained starts can have the wrong
+#' sign, which such a prior sets to zero, and greedy then stops early. Only data given as an
 #' ordinary numeric matrix are supported, with missing entries as `NA`: not tensors,
 #' sparse `Matrix` objects or low-rank (`u`, `d`, `v`) data.
 #'
@@ -89,15 +113,20 @@
 #'   hundred by a few hundred.
 #' @param maxiter Maximum number of iterations per start.
 #' @param tol Tolerance on the relative decrease of the RSS.
+#' @param sign_constraints `NULL` (default) or a vector of two values in
+#'   \code{c(-1, 0, 1)}, for the rows and the columns of the data (not the smooth and
+#'   the other dimension): `1` non-negative, `-1` non-positive, `0` unconstrained. See
+#'   Details.
 #' @param seed Random seed for the starts. The caller's random number stream is
 #'   restored afterwards. `NULL` draws the starts from the current stream instead.
 #'
 #' @return A list of two vectors, as `init_fn` must return: the starting values for
 #'   the rows (length `nrow` of the data) and for the columns (length `ncol`). Their
 #'   outer product is the fitted rank-one approximation. The two vectors have equal
-#'   norms, and the entry of the smooth vector with the largest absolute value is
-#'   positive. If the observed residuals are all zero, both vectors are zero, and
-#'   flashier then adds no further factor. Residuals that are only numerically
+#'   norms. Without sign constraints, the entry of the smooth vector with the largest
+#'   absolute value is positive; with them, the signs are those the constraints give.
+#'   If the observed residuals are all zero, or no start has a non-zero fit within the
+#'   sign constraints, both vectors are zero, and flashier then adds no further factor. Residuals that are only numerically
 #'   orthogonal to the basis give vectors at rounding level, not zero; flashier then
 #'   optimizes from them as usual.
 #'
@@ -123,6 +152,13 @@
 #'   # A constant curve (closed form, no iterations):
 #'   init_const <- function(f) flash_greedy_init_smooth(f, x = tt, basis = "constant")
 #'
+#'   # Non-negative scores (semi-NMF): pass the constraint that flashier would give
+#'   # its own default initialization, here c(0, 1) (rows free, columns >= 0):
+#'   init_nn <- function(f) flash_greedy_init_smooth(f, x = tt, sign_constraints = c(0, 1))
+#'   fl_nn <- flashier::flash_init(Y, var_type = 0)
+#'   fl_nn <- flashier::flash_greedy(fl_nn, Kmax = 2, init_fn = init_nn,
+#'                                   ebnm_fn = list(prior_L, ebnm::ebnm_point_exponential))
+#'
 #'   # Smooth factors instead of loadings (time along the columns):
 #'   init_t <- function(f) flash_greedy_init_smooth(f, x = tt, smooth_dim = 2)
 #'   fl_t <- flashier::flash_init(t(Y), var_type = 0)
@@ -134,7 +170,7 @@
 flash_greedy_init_smooth <- function(flash, x, smooth_dim = 1L,
                                      basis = c("ns", "constant", "linear"), df = 4L,
                                      nstarts = 10L, maxiter = 100L, tol = 1e-6,
-                                     seed = 666L) {
+                                     sign_constraints = NULL, seed = 666L) {
   basis <- match.arg(basis)
   if (!inherits(flash, c("flash_fit", "flash"))) {
     stop("`flash` must be the flash_fit object that flashier passes to `init_fn`.",
@@ -151,7 +187,8 @@ flash_greedy_init_smooth <- function(flash, x, smooth_dim = 1L,
   }
   out <- .smooth_init_matrix(stats::residuals(flash), x, smooth_dim = smooth_dim,
                              basis = basis, df = df, nstarts = nstarts,
-                             maxiter = maxiter, tol = tol, seed = seed)
+                             maxiter = maxiter, tol = tol,
+                             sign_constraints = sign_constraints, seed = seed)
   list(out$row_values, out$column_values)
 }
 
@@ -193,17 +230,25 @@ flash_greedy_init_smooth <- function(flash, x, smooth_dim = 1L,
   B
 }
 
-# Scores given the loading: f_j = sum_i Z_ij l_i R_ij / sum_i Z_ij l_i^2. R is zero
-# at the missing entries and Zn is the 0/1 observed indicator. A column whose
+# Scores given the loading: f_j = sum_i Z_ij l_i R_ij / sum_i Z_ij l_i^2, clipped to
+# `sign`. R is zero at the missing entries and Zn is the 0/1 observed indicator. A column whose
 # observed l_i are all at rounding level (|l_i| <= 100 eps max|l|) gets f_j = 0.
 # That is a numerical-zero test, not a regularization.
-.smooth_init_fstep <- function(R, Zn, l) {
+.smooth_init_fstep <- function(R, Zn, l, sign = 0) {
   den <- as.numeric(crossprod(Zn, l^2))
   num <- as.numeric(crossprod(R, l))
   ok <- as.numeric(crossprod(Zn, abs(l) > 100 * .Machine$double.eps * max(abs(l)))) > 0
   f <- numeric(length(den))
   f[ok] <- num[ok] / den[ok]
-  f
+  .smooth_init_clip(f, sign)
+}
+
+# Entries of the wrong sign set to zero: sign = 1 keeps v >= 0, -1 keeps v <= 0, 0 all.
+# For the f-step this is the exact constrained least-squares step (it is separable in f_j).
+.smooth_init_clip <- function(v, sign) {
+  if (sign == 1) v <- pmax(v, 0)
+  if (sign == -1) v <- pmin(v, 0)
+  v
 }
 
 # Basis coefficients given the scores: minimizes sum_(i,j) observed (R_ij - f_j Q_i a)^2.
@@ -225,8 +270,10 @@ flash_greedy_init_smooth <- function(flash, x, smooth_dim = 1L,
 
 # Rank-one alternating least squares with l = Q a, from the starting directions in
 # the columns of A0. Q has orthonormal columns, so |l| = |a|. Values of R at the
-# missing entries (!Z) are placeholders and are never used.
-.smooth_init_als <- function(R, Z, Q, A0, maxiter, tol) {
+# missing entries (!Z) are placeholders and are never used. sign_l and sign_f (-1, 0
+# or 1) constrain the sign of l and f: f is clipped in every f-step (exact), l = Q a is
+# clipped after every alpha-step (not exact: the RSS can then increase).
+.smooth_init_als <- function(R, Z, Q, A0, maxiter, tol, sign_l = 0, sign_f = 0) {
   R[!Z] <- 0
   Zn <- Z * 1
   tss <- sum(R^2)
@@ -237,8 +284,23 @@ flash_greedy_init_smooth <- function(flash, x, smooth_dim = 1L,
   starts <- vector("list", ncol(A0))
   for (s in seq_len(ncol(A0))) {
     l <- as.numeric(Q %*% (A0[, s] / sqrt(sum(A0[, s]^2))))
-    f <- .smooth_init_fstep(R, Zn, l)
+    if (sign_l != 0) {
+      # flip the start to the constrained sign where its largest entry is, then clip
+      if (sign_l * l[which.max(abs(l))] < 0) l <- -l
+      l <- .smooth_init_clip(l, sign_l)
+    }
+    f <- .smooth_init_fstep(R, Zn, l, sign_f)
     r <- rss(l, f)
+    if (sign_l == 0 && sign_f != 0) {
+      # the sign of f fixes the sign of l: keep the better of the two signs of the start
+      f2 <- .smooth_init_fstep(R, Zn, -l, sign_f)
+      r2 <- rss(-l, f2)
+      if (is.finite(r2) && (!is.finite(r) || r2 < r)) {
+        l <- -l
+        f <- f2
+        r <- r2
+      }
+    }
     best <- if (is.finite(r)) list(l = l, f = f, rss = r) else NULL
     status <- if (is.null(best)) "failed" else if (all(f == 0)) "zero" else "maxiter"
     it <- 0L
@@ -250,8 +312,12 @@ flash_greedy_init_smooth <- function(flash, x, smooth_dim = 1L,
         status <- "numerical"
         break
       }
-      l <- as.numeric(Q %*% (a / na))
-      f <- .smooth_init_fstep(R, Zn, l)
+      l <- .smooth_init_clip(as.numeric(Q %*% (a / na)), sign_l)
+      if (!any(l != 0)) {
+        status <- "numerical"
+        break
+      }
+      f <- .smooth_init_fstep(R, Zn, l, sign_f)
       r_new <- rss(l, f)
       if (!is.finite(r_new)) {
         status <- "numerical"
@@ -280,12 +346,14 @@ flash_greedy_init_smooth <- function(flash, x, smooth_dim = 1L,
                            status = vapply(starts, `[[`, character(1), "status")))
 }
 
-# basis = "constant": l = 1 and f_j = mean of the observed residuals of column j.
-.smooth_init_constant <- function(R, Z) {
+# basis = "constant": l = 1 (-1 if sign_l = -1) and f_j = l times the mean of the
+# observed residuals of column j, clipped to sign_f (exact, as in the f-step).
+.smooth_init_constant <- function(R, Z, sign_l = 0, sign_f = 0) {
   R[!Z] <- 0
   cnt <- colSums(Z)
-  f <- ifelse(cnt > 0, colSums(R) / pmax(cnt, 1), 0)
-  l <- rep(1, nrow(R))
+  l1 <- if (sign_l == -1) -1 else 1
+  f <- .smooth_init_clip(l1 * ifelse(cnt > 0, colSums(R) / pmax(cnt, 1), 0), sign_f)
+  l <- rep(l1, nrow(R))
   list(l = l, f = f, rss = sum(Z * (R - tcrossprod(l, f))^2), tss = sum(R^2),
        iter = 0L, status = if (all(f == 0)) "zero" else "exact", starts = NULL)
 }
@@ -313,7 +381,7 @@ flash_greedy_init_smooth <- function(flash, x, smooth_dim = 1L,
 # constant basis); starts has one row per start.
 .smooth_init_matrix <- function(R, x, smooth_dim = 1L, basis = c("ns", "constant", "linear"),
                                 df = 4L, nstarts = 10L, maxiter = 100L, tol = 1e-6,
-                                seed = 666L) {
+                                sign_constraints = NULL, seed = 666L) {
   basis <- match.arg(basis)
   if (!is.matrix(R) || !is.numeric(R)) {
     stop(sprintf(paste0("The residuals must be an ordinary numeric matrix (got class \"%s\"); ",
@@ -323,6 +391,14 @@ flash_greedy_init_smooth <- function(flash, x, smooth_dim = 1L,
   if (!is.numeric(smooth_dim) || length(smooth_dim) != 1L || !isTRUE(smooth_dim %in% c(1, 2))) {
     stop("`smooth_dim` must be 1 or 2.", call. = FALSE)
   }
+  if (is.null(sign_constraints)) sign_constraints <- c(0, 0)
+  if (!is.numeric(sign_constraints) || length(sign_constraints) != 2L ||
+      !all(sign_constraints %in% c(-1, 0, 1))) {
+    stop("`sign_constraints` must be NULL or two values in c(-1, 0, 1), for the rows and the columns.",
+         call. = FALSE)
+  }
+  sign_l <- sign_constraints[smooth_dim]
+  sign_f <- sign_constraints[3 - smooth_dim]
   if (smooth_dim == 2) R <- t(R)
   if (!is.numeric(x) || length(x) != nrow(R) || any(!is.finite(x))) {
     stop(sprintf("`x` must be a numeric vector of %d finite coordinates, one per %s of the data.",
@@ -344,22 +420,23 @@ flash_greedy_init_smooth <- function(flash, x, smooth_dim = 1L,
 
   B <- .smooth_init_basis(as.numeric(x), basis, df)
   fit <- if (basis == "constant") {
-    .smooth_init_constant(R, Z)
+    .smooth_init_constant(R, Z, sign_l, sign_f)
   } else if (all(R[Z] == 0)) {
     list(l = rep(0, nrow(R)), f = rep(0, ncol(R)), rss = 0, tss = 0, iter = 0L,
          status = "zero", starts = NULL)
   } else {
     Q <- qr.Q(qr(B))
-    .smooth_init_als(R, Z, Q, .smooth_init_starts(ncol(Q), nstarts, seed), maxiter, tol)
+    .smooth_init_als(R, Z, Q, .smooth_init_starts(ncol(Q), nstarts, seed), maxiter, tol,
+                     sign_l, sign_f)
   }
 
-  # equal norms and a fixed sign; the outer product is unchanged
+  # equal norms and, without sign constraints, a fixed sign; the outer product is unchanged
   l <- fit$l
   f <- fit$f
   if (all(f == 0)) {
     l <- 0 * l
   } else {
-    if (l[which.max(abs(l))] < 0) {
+    if (sign_l == 0 && sign_f == 0 && l[which.max(abs(l))] < 0) {
       l <- -l
       f <- -f
     }

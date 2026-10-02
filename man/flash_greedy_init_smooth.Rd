@@ -13,6 +13,7 @@ flash_greedy_init_smooth(
   nstarts = 10L,
   maxiter = 100L,
   tol = 1e-06,
+  sign_constraints = NULL,
   seed = 666L
 )
 }
@@ -41,6 +42,11 @@ hundred by a few hundred.}
 
 \item{tol}{Tolerance on the relative decrease of the RSS.}
 
+\item{sign_constraints}{\code{NULL} (default) or a vector of two values in
+\code{c(-1, 0, 1)}, for the rows and the columns of the data (not the smooth and
+the other dimension): \code{1} non-negative, \code{-1} non-positive, \code{0} unconstrained. See
+Details.}
+
 \item{seed}{Random seed for the starts. The caller's random number stream is
 restored afterwards. \code{NULL} draws the starts from the current stream instead.}
 }
@@ -48,9 +54,10 @@ restored afterwards. \code{NULL} draws the starts from the current stream instea
 A list of two vectors, as \code{init_fn} must return: the starting values for
 the rows (length \code{nrow} of the data) and for the columns (length \code{ncol}). Their
 outer product is the fitted rank-one approximation. The two vectors have equal
-norms, and the entry of the smooth vector with the largest absolute value is
-positive. If the observed residuals are all zero, both vectors are zero, and
-flashier then adds no further factor. Residuals that are only numerically
+norms. Without sign constraints, the entry of the smooth vector with the largest
+absolute value is positive; with them, the signs are those the constraints give.
+If the observed residuals are all zero, or no start has a non-zero fit within the
+sign constraints, both vectors are zero, and flashier then adds no further factor. Residuals that are only numerically
 orthogonal to the basis give vectors at rounding level, not zero; flashier then
 optimizes from them as usual.
 }
@@ -102,6 +109,32 @@ iterations, and the start with the smallest RSS is returned. No noise variance,
 prior, ridge or roughness penalty is involved, and missing entries (\code{NA} in the
 residuals) are left out, not treated as zeros.
 
+\strong{Sign constraints.} \code{sign_constraints} gives one value per dimension of the data,
+rows first: \code{1} for a non-negative vector, \code{-1} for a non-positive one, \code{0} for
+none, as in \code{\link[flashier:flash_greedy_init_default]{flashier::flash_greedy_init_default()}}. flashier works these out from
+\code{ebnm_fn} (e.g. \code{c(0, 1)} for any loading prior with
+\code{\link[ebnm:ebnm_point_exponential]{ebnm::ebnm_point_exponential()}} scores) but passes them only to its own default
+initialization, so with this function they have to be given explicitly. They are
+enforced the way flashier's default does it, by setting each update's entries of
+the wrong sign to zero:
+\itemize{
+\item On the other dimension (\eqn{f}), this gives the exact constrained least-squares
+step, because the problem is separable in the \eqn{f_j}. The iteration still
+never increases the RSS. Since \eqn{f}'s sign then fixes \eqn{\ell}'s, each
+random start is tried with both signs of its curve, and the one with the smaller
+RSS is kept.
+\item On the smooth dimension, the curve \eqn{B\alpha} is clipped after each step. The
+clipped curve is in general no longer in the span of the basis, and the step is
+no longer an exact least-squares step, so the RSS can increase; the start then
+stops and keeps its best iterate (status \code{"rss_increase"}). Each start's curve is
+flipped to have the constrained sign where its largest entry is.
+}
+
+With a constraint on either dimension, the returned vectors keep the signs the
+constraints give them (no sign normalization). If no start has a non-zero fit
+within the constraints, both vectors are zero, and flashier then adds no further
+factor. \code{sign_constraints = NULL} (default) or \code{c(0, 0)} gives the unconstrained fit.
+
 A column with no observed entry gets \eqn{f_j = 0}, as does a column whose observed
 rows all have \eqn{|\ell_i|} at rounding level, at most \eqn{100\epsilon
 \max_i |\ell_i|} (the ratio would then be rounding error). A row of the smooth
@@ -116,9 +149,9 @@ nearly zero at the time of a column observed once, with that column's \eqn{f_j}
 growing without bound. Such a start fits the other columns worse, so the
 smallest-RSS rule avoids it as long as one start escapes; this is why the default
 uses 10 starts (on sparse simulated data, 3 starts all got stuck in 2 of 3 data
-sets, and 10 starts never did). There are no sign constraints: \eqn{\ell} and
-\eqn{f} can take both signs, so this initialization does not suit non-negative
-priors (a start that violates the prior's constraint can make greedy stop early). Only data given as an
+sets, and 10 starts never did). With a non-negative (or non-positive) prior on
+either dimension, pass \code{sign_constraints}: unconstrained starts can have the wrong
+sign, which such a prior sets to zero, and greedy then stops early. Only data given as an
 ordinary numeric matrix are supported, with missing entries as \code{NA}: not tensors,
 sparse \code{Matrix} objects or low-rank (\code{u}, \code{d}, \code{v}) data.
 }
@@ -141,6 +174,13 @@ if (requireNamespace("flashier", quietly = TRUE)) {
   init_lin <- function(f) flash_greedy_init_smooth(f, x = tt, basis = "linear")
   # A constant curve (closed form, no iterations):
   init_const <- function(f) flash_greedy_init_smooth(f, x = tt, basis = "constant")
+
+  # Non-negative scores (semi-NMF): pass the constraint that flashier would give
+  # its own default initialization, here c(0, 1) (rows free, columns >= 0):
+  init_nn <- function(f) flash_greedy_init_smooth(f, x = tt, sign_constraints = c(0, 1))
+  fl_nn <- flashier::flash_init(Y, var_type = 0)
+  fl_nn <- flashier::flash_greedy(fl_nn, Kmax = 2, init_fn = init_nn,
+                                  ebnm_fn = list(prior_L, ebnm::ebnm_point_exponential))
 
   # Smooth factors instead of loadings (time along the columns):
   init_t <- function(f) flash_greedy_init_smooth(f, x = tt, smooth_dim = 2)

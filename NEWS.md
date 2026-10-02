@@ -1,3 +1,25 @@
+# EBSmoothr 0.3.5
+
+## New features
+
+- `flash_greedy_init_smooth()` gains `sign_constraints`, for non-negative (or
+  non-positive) priors such as `ebnm::ebnm_point_exponential()` scores in a
+  semi-non-negative factorization. It takes one value per dimension of the data (rows,
+  then columns; `1` non-negative, `-1` non-positive, `0` free), as in flashier's
+  `flash_greedy_init_default()`. flashier derives these from `ebnm_fn` but passes them
+  only to its own default initialization, so they must be given explicitly, e.g.
+  `function(f) flash_greedy_init_smooth(f, x = t, sign_constraints = c(0, 1))`. As in
+  flashier, each update's entries of the wrong sign are set to zero. On the non-smooth
+  dimension this is the exact constrained least-squares step, and each random start is
+  tried with both signs of its curve. On the smooth dimension the curve is clipped after
+  each step, which leaves the basis and can increase the RSS; the start then keeps its
+  best iterate. With constraints the returned vectors are not sign-normalized. Without
+  them (`NULL`, the default, or `c(0, 0)`), the output is identical to 0.3.4.
+  Unconstrained starts can have the wrong sign for such a prior, which sets them to
+  zero and stops greedy early: on a 16 x 16,319 gene-expression matrix with
+  point-exponential scores, greedy stopped at 2 factors without the constraint and
+  reached the requested 10 with it.
+
 # EBSmoothr 0.3.4
 
 ## New features
