@@ -16,7 +16,9 @@ ebnm_Matern_generator(
   backend = c("auto", "exact", "laplace", "laplace_fisher", "fisher_pql", "inla",
     "inlabru"),
   pql_inner_iter = 3L,
-  link = c("identity", "log", "softplus", "logit", "probit")
+  link = c("identity", "log", "softplus", "logit", "probit"),
+  range_max = NULL,
+  restart = FALSE
 )
 }
 \arguments{
@@ -93,6 +95,19 @@ Matern fits. The default is \code{3}.}
 means. \code{"log"} and \code{"softplus"} fit positive mean functions and
 report posterior summaries on the positive response scale. \code{"logit"}
 and \code{"probit"} are reserved and currently unsupported.}
+
+\item{range_max}{Upper bound on the Matern range searched by the exact
+Gaussian backend (\code{link = "identity"}). \code{NULL} (default) uses 20
+times the diameter of the locations' bounding box; \code{Inf} removes the
+bound. Far beyond the domain the field is numerically constant, the marginal
+likelihood is flat in the range and the SPDE precision becomes numerically
+singular, which can trap the optimizer.}
+
+\item{restart}{Logical. For the exact Gaussian backend, when \code{g_init}
+supplies a range or sigma (for example a warm start from flashier), also
+optimize from the default start and keep the fit with the larger log
+marginal likelihood. Default \code{FALSE}: with the range bound it made no
+difference in the cases checked and doubles the cost of each call.}
 }
 \value{
 A function with signature

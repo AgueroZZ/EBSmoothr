@@ -1670,6 +1670,10 @@ Constant <- function(beta = NULL, beta_prec = NULL) {
 #' @param matern_n_starts Number of Step A optimization starts for the
 #'   package-owned TMB Matern Laplace learned-noise path. The default is `1`;
 #'   use `5` to reproduce the earlier multistart behavior.
+#' @param matern_range_max Upper bound on the Matern range searched by the exact
+#'   known-noise Gaussian backend, as `range_max` in [ebnm_Matern_generator()].
+#'   `NULL` (default) uses 20 times the diameter of the locations; `Inf` removes
+#'   the bound.
 #' @param pql_inner_iter Positive integer number of Fisher/PQL pseudo-Gaussian
 #'   Step A updates used by Matern `backend = "fisher_pql"` and by
 #'   `backend = "auto"` when it resolves to Fisher-PQL for log or softplus
@@ -1753,6 +1757,7 @@ eb_smoother <- function(x,
                         alpha = 2,
                         max.edge = NULL,
                         matern_n_starts = 1L,
+                        matern_range_max = NULL,
                         pql_inner_iter = 3L,
                         profile_s_lower = 1e-8,
                         profile_s_upper = NULL,
@@ -1921,6 +1926,7 @@ eb_smoother <- function(x,
     A <- setup0$A
     spde_template <- setup0$spde_template
     penalty_range0 <- setup0$penalty_range
+    log_range_max0 <- .matern_resolve_log_range_max(matern_range_max, loc_mat)
 
     resolved_init <- .resolve_matern_g_init(
       x = x,
@@ -2257,7 +2263,8 @@ eb_smoother <- function(x,
           pc_penalty = resolved_init$pc_penalty,
           suppress_warnings = suppress_warnings,
           fix_g = fix_g,
-          fix_params = fix_params_use
+          fix_params = fix_params_use,
+          log_range_max = log_range_max0
         )
         fit$data <- .eb_smoother_data_frame(x, s_vec)
         fit$g_init <- resolved_init$g_init

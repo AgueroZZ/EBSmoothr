@@ -1,3 +1,25 @@
+# EBSmoothr 0.3.6
+
+## Bug fixes
+
+- `ebnm_Matern_generator()`: the exact Gaussian backend (`link = "identity"`) now bounds
+  the range it searches, by default at 20 times the diameter of the locations (new
+  argument `range_max`; `Inf` restores the old unbounded search). Far beyond the domain
+  the field is numerically constant, the marginal likelihood is flat in the range, and the
+  SPDE precision becomes numerically singular: the log-likelihood could no longer be
+  evaluated reliably (the Cholesky factorization failed or returned values that changed by
+  tens of nats with a 0.05% change in sigma), and BFGS stopped there. Inside flashier the
+  next update warm-started from that point, so the factor stayed trapped. On a
+  sparse heart-valve LVMI matrix (130 months x 256 patients, zero-mean Matern mean factor)
+  this cost 106 nats of ELBO; with the bound the fit reaches the optimum found from other
+  starts. With a finite bound the optimizer is L-BFGS-B, and starts beyond the bound are
+  moved onto it. Fits whose optimum lies inside the bound are unchanged (checked on the
+  MACS CD4 and PBC bilirubin fits).
+- New argument `restart` (default `FALSE`): when `g_init` supplies a range or sigma, also
+  optimize from the default start and keep the larger log marginal likelihood. With the
+  range bound it made no difference in the cases checked, and it doubles the cost of each
+  call.
+
 # EBSmoothr 0.3.5
 
 ## New features

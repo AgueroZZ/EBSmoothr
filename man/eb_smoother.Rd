@@ -23,6 +23,7 @@ eb_smoother(
   alpha = 2,
   max.edge = NULL,
   matern_n_starts = 1L,
+  matern_range_max = NULL,
   pql_inner_iter = 3L,
   profile_s_lower = 1e-08,
   profile_s_upper = NULL,
@@ -124,6 +125,11 @@ screening-oriented fits.}
 \item{matern_n_starts}{Number of Step A optimization starts for the
 package-owned TMB Matern Laplace learned-noise path. The default is \code{1};
 use \code{5} to reproduce the earlier multistart behavior.}
+
+\item{matern_range_max}{Upper bound on the Matern range searched by the exact
+known-noise Gaussian backend, as \code{range_max} in \code{\link[=ebnm_Matern_generator]{ebnm_Matern_generator()}}.
+\code{NULL} (default) uses 20 times the diameter of the locations; \code{Inf} removes
+the bound.}
 
 \item{pql_inner_iter}{Positive integer number of Fisher/PQL pseudo-Gaussian
 Step A updates used by Matern \code{backend = "fisher_pql"} and by

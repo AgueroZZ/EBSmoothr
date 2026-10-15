@@ -647,19 +647,37 @@ utils::globalVariables(".scale_w")
 .optimize_exact_matern_objective <- function(par0,
                                              safe_objective,
                                              eval_objective,
-                                             failure_label) {
-  methods <- c("BFGS", "Nelder-Mead")
+                                             failure_label,
+                                             upper = NULL) {
+  # `upper`: optional named upper bounds (e.g. on log_range). With a finite bound the
+  # optimizer is L-BFGS-B; the Nelder-Mead fallback evaluates at the clamped point.
+  bounded <- !is.null(upper) && any(is.finite(upper[names(par0)]), na.rm = TRUE)
+  if (bounded) {
+    upper <- upper[names(par0)]
+    upper[is.na(upper)] <- Inf
+    names(upper) <- names(par0)
+    clamp <- function(par) pmin(par, upper)
+    par0 <- clamp(par0)
+  } else {
+    clamp <- identity
+  }
+  methods <- if (bounded) c("L-BFGS-B", "Nelder-Mead") else c("BFGS", "Nelder-Mead")
   last_message <- NULL
 
   for (method in methods) {
     opt <- tryCatch(
-      optim(par = par0, fn = safe_objective, method = method),
+      if (identical(method, "L-BFGS-B")) {
+        optim(par = par0, fn = safe_objective, method = method, upper = upper)
+      } else {
+        optim(par = par0, fn = function(par) safe_objective(clamp(par)), method = method)
+      },
       error = function(e) e
     )
     if (inherits(opt, "error")) {
       last_message <- conditionMessage(opt)
       next
     }
+    opt$par <- clamp(opt$par)
     if (!is.finite(opt$value) || opt$value >= 1e99) {
       last_message <- sprintf("%s optimization reached the finite penalty under method %s.", failure_label, method)
       next
@@ -698,7 +716,8 @@ utils::globalVariables(".scale_w")
                                                fixed_names = character(),
                                                safe_objective,
                                                eval_objective,
-                                               failure_label) {
+                                               failure_label,
+                                               upper = NULL) {
   if (is.null(names(par0)) || any(names(par0) == "")) {
     stop("Internal error: Matern optimizer parameters must be named.")
   }
@@ -720,11 +739,23 @@ utils::globalVariables(".scale_w")
     par0 = par0[free_names],
     safe_objective = function(par_free) safe_objective(expand_par(par_free)),
     eval_objective = function(par_free) eval_objective(expand_par(par_free)),
-    failure_label = failure_label
+    failure_label = failure_label,
+    upper = if (is.null(upper)) NULL else upper[intersect(names(upper), free_names)]
   )
   opt_res$free_names <- free_names
   opt_res$fixed_names <- fixed_names
   opt_res
+}
+
+.matern_resolve_log_range_max <- function(range_max, locations, mult = 20) {
+  if (is.null(range_max)) {
+    loc <- as.matrix(locations)
+    diam <- sqrt(sum(apply(loc, 2, function(v) diff(range(v)))^2))
+    return(if (is.finite(diam) && diam > 0) log(mult * diam) else Inf)
+  }
+  range_max <- .check_single_numeric(range_max, "range_max")
+  if (!(range_max > 0)) stop("`range_max` must be positive (or Inf for no bound).")
+  log(range_max)
 }
 
 .matern_exact_optimization_diagnostics <- function(opt_res) {
@@ -743,6 +774,7 @@ utils::globalVariables(".scale_w")
 
   list(
     method = opt_res$method,
+    restart_used = isTRUE(opt_res$restart_used),
     convergence = if (is.null(opt$convergence)) NA_integer_ else as.integer(opt$convergence),
     message = if (is.null(opt$message)) "" else as.character(opt$message),
     counts = opt$counts,
@@ -5149,7 +5181,9 @@ matern_objective_breakdown <- function(fit,
                                           pc_penalty = NULL,
                                           suppress_warnings = TRUE,
                                           fix_g = FALSE,
-                                          fix_params = character()) {
+                                          fix_params = character(),
+                                          log_range_max = Inf,
+                                          restart_par0 = NULL) {
   if (isTRUE(fix_g)) fix_params <- unique(c(fix_params, "range", "sigma"))
   fixed_names <- .matern_fixed_log_param_names(fix_params)
   data_stats <- .exact_matern_data_stats(x = as.numeric(x), s = as.numeric(s), A = A)
@@ -5231,13 +5265,31 @@ matern_objective_breakdown <- function(fit,
   }
 
   par0 <- c(log_range = theta_init, log_sigma = log(sigma_init))
-  opt_res <- .matern_optimize_or_eval_objective(
-    par0 = par0,
+  run_opt <- function(start) .matern_optimize_or_eval_objective(
+    par0 = start,
     fixed_names = fixed_names,
     safe_objective = safe_objective,
     eval_objective = eval_objective,
-    failure_label = "Exact Matern optimization failed"
+    failure_label = "Exact Matern optimization failed",
+    upper = c(log_range = log_range_max)
   )
+  opt_res <- tryCatch(run_opt(par0), error = function(e) e)
+  # Optional second start (e.g. the default start when par0 is a warm start); the fit with
+  # the larger log marginal likelihood is kept.
+  free <- setdiff(names(par0), fixed_names)
+  if (!is.null(restart_par0) && length(free)) {
+    par_alt <- par0
+    par_alt[free] <- as.numeric(restart_par0[free])
+    if (any(abs(par_alt - par0) > 1e-8)) {
+      opt_alt <- tryCatch(run_opt(par_alt), error = function(e) e)
+      if (inherits(opt_res, "error") ||
+          (!inherits(opt_alt, "error") && opt_alt$objective$log_marginal > opt_res$objective$log_marginal)) {
+        opt_alt$restart_used <- TRUE
+        opt_res <- opt_alt
+      }
+    }
+  }
+  if (inherits(opt_res, "error")) stop(opt_res)
   objective_opt <- opt_res$objective
   state <- .matern_exact_state_with_beta_mode(
     x = as.numeric(x),
@@ -6018,6 +6070,17 @@ Matern <- function(theta = NULL, sigma = 1, beta = NULL, beta_prec = NULL) {
 #'   means. \code{"log"} and \code{"softplus"} fit positive mean functions and
 #'   report posterior summaries on the positive response scale. \code{"logit"}
 #'   and \code{"probit"} are reserved and currently unsupported.
+#' @param range_max Upper bound on the Matern range searched by the exact
+#'   Gaussian backend (\code{link = "identity"}). \code{NULL} (default) uses 20
+#'   times the diameter of the locations' bounding box; \code{Inf} removes the
+#'   bound. Far beyond the domain the field is numerically constant, the marginal
+#'   likelihood is flat in the range and the SPDE precision becomes numerically
+#'   singular, which can trap the optimizer.
+#' @param restart Logical. For the exact Gaussian backend, when \code{g_init}
+#'   supplies a range or sigma (for example a warm start from flashier), also
+#'   optimize from the default start and keep the fit with the larger log
+#'   marginal likelihood. Default \code{FALSE}: with the range bound it made no
+#'   difference in the cases checked and doubles the cost of each call.
 #'
 #' @return A function with signature
 #'   \code{function(x, s, g_init = NULL, fix_g = FALSE, beta_fixed = NULL, beta_prec = NULL, fix_params = character(), output = NULL)}.
@@ -6045,7 +6108,9 @@ ebnm_Matern_generator <- function(locations = NULL,
                                   compute_exact_diagnostic = FALSE,
                                   backend = c("auto", "exact", "laplace", "laplace_fisher", "fisher_pql", "inla", "inlabru"),
                                   pql_inner_iter = 3L,
-                                  link = c("identity", "log", "softplus", "logit", "probit")) {
+                                  link = c("identity", "log", "softplus", "logit", "probit"),
+                                  range_max = NULL,
+                                  restart = FALSE) {
 
   alpha_missing <- missing(alpha)
   backend <- .match_matern_backend_arg(backend)
@@ -6073,6 +6138,13 @@ ebnm_Matern_generator <- function(locations = NULL,
   A <- setup0$A
   spde_template <- setup0$spde_template
   penalty_range0 <- setup0$penalty_range
+  # Upper bound on the range for the exact Gaussian backend (default: 20 x the diameter of
+  # the locations). Far beyond the domain the field is numerically constant, the likelihood
+  # is flat in the range, and the SPDE precision becomes numerically singular.
+  log_range_max0 <- .matern_resolve_log_range_max(range_max, loc_mat)
+  if (!is.logical(restart) || length(restart) != 1L || is.na(restart)) {
+    stop("`restart` must be TRUE or FALSE.")
+  }
 
   ebnm_Matern <- function(x,
                           s,
@@ -6397,6 +6469,22 @@ ebnm_Matern_generator <- function(locations = NULL,
       if (!identical(link, "identity")) {
         stop("`backend = \"exact\"` is only available for `link = \"identity\"`; use `backend = \"laplace\"` for log-link Matern fits.")
       }
+      # With a warm start (g_init with range or sigma), also optimize from the default start.
+      restart_par0 <- NULL
+      if (isTRUE(restart) && !is.null(g_init) && (!is.null(g_init$theta) || !is.null(g_init$sigma))) {
+        default_init <- .resolve_matern_g_init(
+          x = x,
+          s = s,
+          g_init = NULL,
+          beta_fixed = beta0_fixed,
+          beta_prec = beta_prec_use,
+          penalty_range0 = penalty_range0,
+          pc.penalty = pc.penalty,
+          allow_noise = FALSE,
+          link = link
+        )
+        restart_par0 <- c(log_range = default_init$theta_init, log_sigma = log(default_init$sigma_init))
+      }
       fit <- .fit_matern_exact_known_noise(
         x = x,
         s = s,
@@ -6412,7 +6500,9 @@ ebnm_Matern_generator <- function(locations = NULL,
         pc_penalty = pc_penalty0,
         suppress_warnings = suppress_warnings,
         fix_g = fix_g,
-        fix_params = fix_params_use
+        fix_params = fix_params_use,
+        log_range_max = log_range_max0,
+        restart_par0 = restart_par0
       )
       fit$data <- data.frame(x = x, s = s)
       fit$mesh <- mesh
