@@ -2,29 +2,44 @@
 % Please edit documentation in R/06_BinaryMarkov.R
 \name{BinaryMarkov}
 \alias{BinaryMarkov}
-\title{Define the symmetric binary Markov prior}
+\title{Define the binary Markov prior}
 \usage{
-BinaryMarkov(flip_prob = 0.1)
+BinaryMarkov(flip_prob = 0.1, pi1 = 0.5)
 }
 \arguments{
-\item{flip_prob}{Symmetric probability of changing state between adjacent
-positions. Must be between \code{0} and \code{0.5}.}
+\item{flip_prob}{Probability of changing state between adjacent positions.
+Must be between \code{0} and \code{2 * pi1 * (1 - pi1)}.}
+
+\item{pi1}{Marginal probability of state one, strictly between 0 and 1.
+The default \code{0.5} gives the symmetric prior.}
 }
 \value{
 A one-row data frame with class \code{"BinaryMarkov"} containing
-\code{flip_prob} and \code{expected_run_length}.
+\code{flip_prob}, \code{pi1}, the transition probabilities \code{p01} and \code{p10}, and the
+expected run lengths \code{expected_run_length} (all runs),
+\code{expected_run_length_zero} and \code{expected_run_length_one}.
 }
 \description{
 Creates a prior-state object for an ordered binary sequence with states zero
-and one, initial probabilities \verb{(0.5, 0.5)}, and symmetric transition matrix
+and one. The sequence is a stationary two-state Markov chain whose marginal
+probability of state one is \code{pi1} at every position, and whose probability of
+changing state between adjacent positions is \code{flip_prob}:
+\deqn{\pi_1 = P(\theta_i = 1), \qquad q = P(\theta_i \ne \theta_{i-1}).}
+The transition probabilities are
+\eqn{p_{01} = P(1 \mid 0) = q / \{2(1-\pi_1)\}} and
+\eqn{p_{10} = P(0 \mid 1) = q / (2\pi_1)}, and the chain starts at its
+stationary distribution \eqn{(1-\pi_1, \pi_1)}.
+
+\code{pi1 = 0.5} gives the symmetric prior, with transition matrix
 \deqn{T(q) = \begin{pmatrix}1-q & q \\ q & 1-q\end{pmatrix}.}
-The parameter \code{flip_prob} is \eqn{q=P(\theta_i\ne\theta_{i-1})}. Restricting
-\eqn{q\le 0.5} represents non-negative adjacent association. For \eqn{q>0},
-the expected run length for either state is \eqn{1/q}; \eqn{q=0.5} reduces
-exactly to the iid binary prior with probability one half.
+Restricting \eqn{q \le 2\pi_1(1-\pi_1)} represents non-negative adjacent
+association; at the upper bound the positions are iid Bernoulli(\code{pi1}).
+The expected run lengths are \eqn{1/p_{01}} for state zero,
+\eqn{1/p_{10}} for state one and \eqn{1/q} over all runs.
 }
 \examples{
 BinaryMarkov()
 BinaryMarkov(flip_prob = 0.05)
+BinaryMarkov(flip_prob = 0.04, pi1 = 0.2)
 
 }

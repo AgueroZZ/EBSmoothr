@@ -2,57 +2,101 @@
 % Please edit documentation in R/06_BinaryMarkov.R
 \name{ebnm_binary_markov}
 \alias{ebnm_binary_markov}
-\title{Exact symmetric binary Markov normal-means solver}
+\title{Exact binary Markov normal-means solver}
 \usage{
-ebnm_binary_markov(x, s, flip_prob = NULL, flip_prob_bounds = c(0, 0.5))
+ebnm_binary_markov(
+  x,
+  s,
+  flip_prob = NULL,
+  pi1 = NULL,
+  flip_prob_bounds = c(0, 0.5),
+  pi1_bounds = c(1e-04, 1 - 1e-04),
+  g_init = NULL,
+  fix_g = FALSE,
+  output = NULL
+)
 }
 \arguments{
-\item{x}{Numeric vector of at least two ordered observations when estimating
-\code{flip_prob}. A single observation is allowed for a fixed-parameter fit.}
+\item{x}{Numeric vector of ordered observations. At least two are needed to
+estimate a parameter.}
 
-\item{s}{Known observation standard errors. Supply one positive value or a
-positive vector with the same length as \code{x}.}
+\item{s}{Observation standard errors: one non-negative value or a vector the
+same length as \code{x}. \code{Inf} marks an uninformative observation; \code{0} fixes
+\eqn{\theta_i = x_i}, which must then be 0 or 1.}
 
-\item{flip_prob}{Optional fixed symmetric transition probability. If \code{NULL},
-search numerically using exact marginal-likelihood evaluations.}
+\item{flip_prob}{Optional fixed switching probability. If \code{NULL}, it is
+estimated.}
 
-\item{flip_prob_bounds}{Two increasing values defining the empirical-Bayes
-numerical-search interval. Both must lie inside \verb{[0, 0.5]}.}
+\item{pi1}{Optional fixed marginal probability of state one. If \code{NULL} (the
+default), it is estimated; \code{pi1 = 0.5} gives the symmetric prior.}
+
+\item{flip_prob_bounds}{Two increasing values inside \verb{[0, 0.5]} bounding the
+search for \code{flip_prob}. The search is further limited to
+\code{flip_prob <= 2 * pi1 * (1 - pi1)}.}
+
+\item{pi1_bounds}{Two increasing values inside \verb{(0, 1)} bounding the search
+for \code{pi1}.}
+
+\item{g_init}{Optional \code{\link[=BinaryMarkov]{BinaryMarkov()}} object. Used as the fixed prior when
+\code{fix_g = TRUE} and as a starting value otherwise. An object without \code{pi1}
+(from an earlier version) is taken as symmetric.}
+
+\item{fix_g}{If \code{TRUE}, the prior is fixed at \code{g_init}.}
+
+\item{output}{\code{NULL} (default) returns every component listed below. A
+character vector, as passed by flashier, returns only the requested
+components among \code{"posterior_mean"}, \code{"posterior_second_moment"},
+\code{"posterior_sd"}, \code{"lfsr"}, \code{"fitted_g"}, \code{"log_likelihood"},
+\code{"posterior_sampler"} and \code{"data"}; \code{lfsr} is the posterior probability
+of state zero.}
 }
 \value{
-An object with class \code{c("list", "ebnm")}. Important fields include:
+An object with class \code{c("list", "ebnm")}. With \code{output = NULL},
+important fields include:
 \itemize{
 \item \code{posterior}: exact marginal posterior state probabilities and
 moments;
 \item \code{posterior_transitions}: exact posterior probabilities for each of
 the four adjacent state pairs and their sum \code{prob_flip};
 \item \code{fitted_g}: the fitted or fixed \code{\link[=BinaryMarkov]{BinaryMarkov()}} state;
-\item \code{log_likelihood}: exact Markov marginal log likelihood;
+\item \code{log_likelihood}: exact Markov marginal log likelihood, with \code{df}
+equal to the number of estimated parameters;
 \item \code{viterbi_path}: most probable joint binary state sequence;
 \item \code{posterior_sampler}: exact forward-filtering backward-sampling
 function returning an \code{nsamp}-by-\code{length(x)} matrix.
 }
 }
 \description{
-Fits an ordered binary normal-means model with intron state zero, exon state
-one, fixed initial probabilities \verb{(0.5, 0.5)}, and the symmetric transition
-prior defined by \code{\link[=BinaryMarkov]{BinaryMarkov()}}. Observations follow
-\deqn{x_i\mid\theta_i,s_i\sim N(\theta_i,s_i^2).}
+Fits an ordered binary normal-means model with state zero and state one
+under the binary Markov prior defined by \code{\link[=BinaryMarkov]{BinaryMarkov()}}:
+\deqn{x_i\mid\theta_i,s_i\sim N(\theta_i,s_i^2), \qquad \theta_i \in \{0, 1\}.}
 
-Conditional on a fixed transition probability, inference and each marginal-
-likelihood evaluation are exact and use a log-space forward-backward
-algorithm. If \code{flip_prob = NULL}, the function numerically searches
-\code{flip_prob_bounds} with \code{\link[stats:optimize]{stats::optimize()}} and separately evaluates both
-interval endpoints. The likelihood need not be concave, so this numerical
-search is not guaranteed to find the global maximizer. If a numeric
-\code{flip_prob} is supplied, the transition parameter is held fixed.
+By default both prior parameters, the marginal probability \code{pi1} and the
+switching probability \code{flip_prob}, are estimated by empirical Bayes. Supply
+\code{pi1 = 0.5} for the symmetric prior (only \code{flip_prob} is then estimated),
+a numeric \code{flip_prob} to hold it fixed, or both to fix the prior entirely.
+
+Conditional on the prior parameters, inference and each marginal-likelihood
+evaluation are exact, using a scaled forward-backward algorithm. A single
+free parameter is searched with \code{\link[stats:optimize]{stats::optimize()}}, and the interval
+endpoints are evaluated separately. With both parameters free, the search
+uses \code{\link[stats:optim]{stats::optim()}} (L-BFGS-B) from several starts, including the
+symmetric empirical-Bayes fit, so the result is never worse than the
+symmetric fit. The likelihood need not be concave, so the numerical search
+is not guaranteed to find the global maximizer.
+
+The function can be used directly as an \code{ebnm_fn} in flashier: it accepts
+\code{g_init}, \code{fix_g} and \code{output}, treats \code{s = Inf} as an uninformative
+observation (for example a time point with no data) and \code{s = 0} as an
+observed state.
 }
 \examples{
 set.seed(1)
-theta <- rep(c(0, 1), each = 6)
-x <- stats::rnorm(length(theta), mean = theta, sd = 0.2)
-fit <- ebnm_binary_markov(x, s = 0.2)
+theta <- rep(c(0, 1, 0), times = c(20, 6, 14))
+x <- stats::rnorm(length(theta), mean = theta, sd = 0.3)
+fit <- ebnm_binary_markov(x, s = 0.3)
 fit$fitted_g
-fit$posterior
+# symmetric prior
+ebnm_binary_markov(x, s = 0.3, pi1 = 0.5)$fitted_g
 
 }

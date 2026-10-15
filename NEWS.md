@@ -1,3 +1,36 @@
+# EBSmoothr 0.4.0
+
+## Breaking changes
+
+- `ebnm_binary_markov()` now estimates the marginal probability `pi1` of
+  state one by default, together with the switching probability `flip_prob`.
+  The 0.3.5 behaviour (symmetric prior, only `flip_prob` estimated) is
+  `ebnm_binary_markov(x, s, pi1 = 0.5)`.
+
+## New features
+
+- The binary Markov prior is now a stationary two-state chain with marginal
+  probability `pi1` and switching probability `flip_prob`
+  (`BinaryMarkov(flip_prob, pi1 = 0.5)`); transition probabilities are
+  `p01 = flip_prob / (2 * (1 - pi1))` and `p10 = flip_prob / (2 * pi1)`, so
+  state zero and state one can have different frequencies and run lengths.
+  `pi1 = 0.5` recovers the previous symmetric prior and `flip_prob = 0.5` the
+  iid model. `BinaryMarkov()` objects also report `p01`, `p10` and the
+  expected run length of each state; `flip_prob` keeps its meaning,
+  `P(theta_i != theta_{i-1})`.
+- With both parameters free, the search uses L-BFGS-B from several starts,
+  including the symmetric empirical-Bayes fit, so the marginal likelihood is
+  never below the symmetric fit's. A single free parameter (`flip_prob` or
+  `pi1`) uses `optimize()` with the interval endpoints checked, as before.
+- `ebnm_binary_markov()` gains `g_init`, `fix_g` and `output`, and can be
+  passed directly to flashier as an `ebnm_fn`. `s = Inf` (for example a time
+  point with no observations) is an uninformative observation and `s = 0` an
+  observed state. `output` restricts the returned components; `lfsr` is the
+  posterior probability of state zero.
+- Inference uses a scaled forward-backward recursion in probability space,
+  several times faster than the previous log-space version. The posterior
+  transition table and the posterior sampler are vectorized.
+
 # EBSmoothr 0.3.5
 
 ## New features
