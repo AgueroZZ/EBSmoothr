@@ -350,7 +350,7 @@ test_that("ebnm_binary_markov works as a flashier ebnm_fn", {
   f <- stats::rnorm(p)
   Y <- outer(l, f) + matrix(stats::rnorm(n * p, sd = 0.5), n, p)
   Y[sample(length(Y), 0.5 * length(Y))] <- NA
-  Y[50:52, ] <- NA  # fully missing time points: flashier passes s = Inf
+  # CRAN flashier (1.0.7) rejects fully missing rows, so s = Inf is tested directly above
   fl <- flashier::flash(Y, ebnm_fn = list(ebnm_binary_markov, ebnm::ebnm_normal),
                         greedy_Kmax = 1, backfit = FALSE, verbose = 0)
   expect_equal(fl$n_factors, 1L)

@@ -62,8 +62,8 @@ iid_fit <- ebnm_binary_markov(x, s, flip_prob = 0.5, pi1 = 0.5)
 ```
 
 The function accepts `g_init`, `fix_g` and `output`, so it can be passed
-directly to flashier as an `ebnm_fn` (missing data give `s = Inf`, which is
-handled as an uninformative observation):
+directly to flashier as an `ebnm_fn`; `s = Inf` is handled as an
+uninformative observation:
 
 ```r
 fl <- flashier::flash(Y, ebnm_fn = list(ebnm_binary_markov, ebnm::ebnm_normal))
