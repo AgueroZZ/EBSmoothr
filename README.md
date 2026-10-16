@@ -1,7 +1,7 @@
 # EBSmoothr
 
 `EBSmoothr` provides empirical Bayes smoothers for Gaussian observations with
-L-GP, Matern, and symmetric binary Markov priors. It supports known observation
+L-GP, Matern, and binary Markov priors. It supports known observation
 standard errors through `ebnm`-compatible interfaces and can also estimate one
 common observation noise standard deviation.
 
@@ -34,9 +34,10 @@ x_i \mid \theta_i, s_i \sim N(\theta_i, s_i^2),
 \qquad \theta_i \in \{0, 1\},
 $$
 
-under a symmetric binary Markov prior. The switching probability can be fixed
-or estimated by a one-dimensional numerical search using exact marginal-
-likelihood evaluations.
+under a stationary binary Markov prior with two parameters: the marginal
+probability `pi1 = P(theta_i = 1)` and the switching probability
+`flip_prob = P(theta_i != theta_{i-1})`. By default both are estimated by
+empirical Bayes from exact marginal-likelihood evaluations; either can be fixed.
 
 ```r
 library(EBSmoothr)
@@ -51,15 +52,26 @@ fit$posterior[, c("prob_zero", "prob_one")]
 fit$viterbi_path
 ```
 
-Set `flip_prob = 0.5` for the equal-probability iid reference model:
+Set `pi1 = 0.5` for the symmetric prior (equal marginal probabilities and
+equal expected run lengths), and add `flip_prob = 0.5` for the
+equal-probability iid reference model:
 
 ```r
-iid_fit <- ebnm_binary_markov(x, s, flip_prob = 0.5)
+sym_fit <- ebnm_binary_markov(x, s, pi1 = 0.5)
+iid_fit <- ebnm_binary_markov(x, s, flip_prob = 0.5, pi1 = 0.5)
 ```
 
-Conditional on a fixed switching probability, forward-backward inference is
-exact. The likelihood need not be concave in the switching probability, so the
-default numerical search is not guaranteed to find the global maximizer.
+The function accepts `g_init`, `fix_g` and `output`, so it can be passed
+directly to flashier as an `ebnm_fn` (missing data give `s = Inf`, which is
+handled as an uninformative observation):
+
+```r
+fl <- flashier::flash(Y, ebnm_fn = list(ebnm_binary_markov, ebnm::ebnm_normal))
+```
+
+Conditional on fixed prior parameters, forward-backward inference is exact.
+The likelihood need not be concave in the parameters, so the default
+numerical search is not guaranteed to find the global maximizer.
 
 ## Continuous smoothers
 
